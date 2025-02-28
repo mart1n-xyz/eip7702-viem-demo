@@ -22,7 +22,7 @@
 <div class="bg-white shadow-sm rounded-lg overflow-hidden border border-gray-100">
   <div class="border-b border-gray-100 px-6 py-4">
     <h2 class="text-xl font-medium text-gray-800 flex items-center">
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
       </svg>
       Wallet Information
@@ -69,7 +69,7 @@
           <div class="flex justify-between items-center">
             <span class="text-gray-500">Network</span>
             <span class="text-gray-800 text-sm flex items-center">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
               </svg>
               Sepolia Testnet
@@ -82,7 +82,7 @@
             <span class="text-gray-500">Address</span>
             <div class="relative">
               <button 
-                class="text-blue-500 hover:text-blue-600 text-sm flex items-center"
+                class="text-blue-400 hover:text-blue-500 text-sm flex items-center"
                 on:click={() => {
                   if ($walletStore.address) {
                     copyToClipboard($walletStore.address);
@@ -116,7 +116,7 @@
             <span class="text-xl font-medium text-gray-800">{formatEthBalance($walletStore.balance)} ETH</span>
           </div>
           <div class="w-full bg-gray-100 rounded-full h-1.5">
-            <div class="bg-blue-400 h-1.5 rounded-full" style="width: {Math.min(Number(formatEthBalance($walletStore.balance)) * 10, 100)}%"></div>
+            <div class="bg-blue-300 h-1.5 rounded-full" style="width: {Math.min(Number(formatEthBalance($walletStore.balance)) * 10, 100)}%"></div>
           </div>
           <p class="text-xs text-gray-400 mt-1">Sepolia testnet ETH has no real value</p>
         </div>
@@ -126,7 +126,7 @@
             href={`https://sepolia.etherscan.io/address/${$walletStore.address}`} 
             target="_blank" 
             rel="noopener noreferrer"
-            class="text-blue-500 hover:text-blue-600 text-sm flex items-center"
+            class="text-blue-400 hover:text-blue-500 text-sm flex items-center"
           >
             View on Etherscan
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 ml-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -138,7 +138,7 @@
             href="https://faucet.sepolia.dev/" 
             target="_blank" 
             rel="noopener noreferrer"
-            class="text-blue-500 hover:text-blue-600 text-sm flex items-center"
+            class="text-blue-400 hover:text-blue-500 text-sm flex items-center"
           >
             Get test ETH
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 ml-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
