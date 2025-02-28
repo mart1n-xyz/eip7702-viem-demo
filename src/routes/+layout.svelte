@@ -1,7 +1,15 @@
 <script lang="ts">
 	import '../app.css';
 	import Navbar from '$lib/components/Navbar.svelte';
+	import { onMount } from 'svelte';
+	import { initWalletConnection } from '$lib/wallet';
+	
 	let { children } = $props();
+	
+	onMount(() => {
+		// Initialize wallet connection from localStorage
+		initWalletConnection();
+	});
 </script>
 
 <div class="min-h-screen flex flex-col bg-gray-50">

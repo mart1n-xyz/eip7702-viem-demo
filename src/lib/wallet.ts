@@ -1,14 +1,15 @@
 import { createWalletClient, custom, type WalletClient } from 'viem';
 import { sepolia } from 'viem/chains';
 import { createPublicClient, http, fallback } from 'viem';
-import { writable } from 'svelte/store';
+import { writable, get } from 'svelte/store';
+import { browser } from '$app/environment';
 
 // Get Infura API key from environment variable
 const INFURA_API_KEY = import.meta.env.VITE_INFURA_API_KEY;
 
 // Create a store for wallet state
 export const walletStore = writable<{
-  address: string | null;
+  address: `0x${string}` | null;
   balance: bigint | null;
   isConnected: boolean;
   isConnecting: boolean;
@@ -30,6 +31,22 @@ export const publicClient = createPublicClient({
     http('https://sepolia.gateway.tenderly.co')
   ])
 });
+
+// Function to save connection state to localStorage
+function saveConnectionState(address: `0x${string}`) {
+  if (browser) {
+    localStorage.setItem('walletConnected', 'true');
+    localStorage.setItem('walletAddress', address);
+  }
+}
+
+// Function to clear connection state from localStorage
+function clearConnectionState() {
+  if (browser) {
+    localStorage.removeItem('walletConnected');
+    localStorage.removeItem('walletAddress');
+  }
+}
 
 // Function to connect wallet
 export async function connectWallet() {
@@ -57,6 +74,9 @@ export async function connectWallet() {
     // Get balance
     const balance = await publicClient.getBalance({ address });
     
+    // Save connection state to localStorage
+    saveConnectionState(address);
+    
     // Update store
     walletStore.update(state => ({
       ...state,
@@ -80,6 +100,9 @@ export async function connectWallet() {
 
 // Function to disconnect wallet
 export function disconnectWallet() {
+  // Clear connection state from localStorage
+  clearConnectionState();
+  
   walletStore.set({
     address: null,
     balance: null,
@@ -90,7 +113,7 @@ export function disconnectWallet() {
 }
 
 // Function to format address for display
-export function formatAddress(address: string | null): string {
+export function formatAddress(address: `0x${string}` | null): string {
   if (!address) return '';
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
@@ -99,6 +122,61 @@ export function formatAddress(address: string | null): string {
 export function formatEthBalance(balance: bigint | null): string {
   if (balance === null) return '0';
   return (Number(balance) / 1e18).toFixed(4);
+}
+
+// Function to initialize wallet connection from localStorage
+export async function initWalletConnection() {
+  if (!browser) return;
+  
+  const isConnected = localStorage.getItem('walletConnected') === 'true';
+  const savedAddress = localStorage.getItem('walletAddress');
+  
+  if (isConnected && savedAddress && window.ethereum) {
+    try {
+      // Check if the wallet is still connected
+      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+      
+      if (accounts.length > 0 && accounts[0].toLowerCase() === savedAddress.toLowerCase()) {
+        // Get balance
+        const address = savedAddress as `0x${string}`;
+        const balance = await publicClient.getBalance({ address });
+        
+        // Update store
+        walletStore.update(state => ({
+          ...state,
+          address,
+          balance,
+          isConnected: true
+        }));
+      } else {
+        // Clear connection state if accounts don't match
+        clearConnectionState();
+      }
+    } catch (error) {
+      console.error('Error initializing wallet connection:', error);
+      clearConnectionState();
+    }
+  }
+}
+
+// Listen for account changes
+if (browser && window.ethereum) {
+  window.ethereum.on('accountsChanged', (accounts: string[]) => {
+    const currentState = get(walletStore);
+    
+    if (accounts.length === 0) {
+      // User disconnected their wallet
+      disconnectWallet();
+    } else if (currentState.isConnected && accounts[0] !== currentState.address) {
+      // Account changed, update the connection
+      connectWallet().catch(console.error);
+    }
+  });
+  
+  window.ethereum.on('chainChanged', () => {
+    // Reload the page when the chain changes
+    window.location.reload();
+  });
 }
 
 // Declare ethereum for TypeScript
