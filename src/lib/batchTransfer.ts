@@ -214,70 +214,166 @@ export async function batchTransfer(
     try {
       reportProgress('transaction', `Submitting transaction to the network...`);
       
-      // Try with explicit gas estimation to avoid Chrome issues
-      const gasEstimate = await publicClient.estimateContractGas({
+      // Detect browser for browser-specific handling
+      const userAgent = navigator.userAgent || '';
+      const isBrave = userAgent.includes("Brave");
+      const isChrome = !isBrave && userAgent.includes("Chrome");
+      
+      reportProgress('browser_detection', `Browser detected: ${isBrave ? 'Brave' : isChrome ? 'Chrome' : 'Other'}`);
+      
+      // Calculate total ETH being transferred for gas estimation purposes
+      const totalEthValue = Number(totalValue) / 1e18;
+      reportProgress('gas_estimation', `Total ETH value: ${totalEthValue.toFixed(6)} ETH`);
+      reportProgress('gas_estimation', `Number of transfers: ${calls.length}`);
+      
+      // First, encode the function call data
+      const callData = encodeFunctionData({
         abi: BATCH_CALL_DELEGATION_ABI,
-        address: walletState.address,
         functionName: 'execute',
         args: [calls],
-        value: totalValue,
-        account: walletState.address,
-      }).catch(e => {
-        reportProgress('gas_estimation', `Gas estimation failed: ${e.message}. Using default gas limit.`);
-        // Return a reasonable default if estimation fails
-        return BigInt(500000 + (calls.length * 50000));
       });
       
-      reportProgress('gas_estimation', `Estimated gas: ${gasEstimate}`);
+      // For EIP-7702 transactions, use an extremely generous fixed gas limit based on the number of transfers
+      // Base gas (for one transfer) + additional gas per transfer
+      const baseGas = BigInt(500000); // Base gas for contract execution and one transfer
+      const gasPerTransfer = BigInt(100000); // Additional gas per transfer
       
-      // Add a buffer to the gas estimate to ensure transaction doesn't fail
-      const gasLimit = gasEstimate * BigInt(120) / BigInt(100); // 20% buffer
+      // Calculate gas limit with a very generous buffer
+      const calculatedGas = baseGas + (gasPerTransfer * BigInt(calls.length));
       
-      const hash = await walletClient.writeContract({
-        abi: BATCH_CALL_DELEGATION_ABI,
-        address: walletState.address,
-        functionName: 'execute',
-        args: [calls],
-        value: totalValue,
-        authorizationList: [authorization],
-        nonce: nonce, // Explicitly setting the nonce
-        gas: gasLimit, // Explicitly set gas limit
-      }).catch(async (error) => {
-        // If the transaction fails with EIP-7702 related errors, try a fallback approach
-        if (
-          error?.message?.includes('EIP-7702') || 
-          error?.message?.includes('delegation') || 
-          error?.message?.includes('authorization') ||
-          error?.message?.includes('reverted') ||
-          error?.message?.includes('execute')
-        ) {
-          reportProgress('fallback', `Using fallback approach for browser compatibility...`);
-          
-          // Encode the function call manually
-          const data = encodeFunctionData({
-            abi: BATCH_CALL_DELEGATION_ABI,
-            functionName: 'execute',
-            args: [calls],
+      // Apply an additional safety multiplier (3x) for EIP-7702 transactions which are gas-intensive
+      // Use an even higher multiplier for Chrome (4x)
+      const gasMultiplier = isChrome ? BigInt(4) : BigInt(3);
+      const gasLimit = calculatedGas * gasMultiplier;
+      
+      reportProgress('gas_estimation', `Using fixed gas calculation for EIP-7702: ${gasLimit.toString()}`);
+      reportProgress('gas_estimation', `Base gas: ${baseGas.toString()}, Per transfer: ${gasPerTransfer.toString()}, Transfers: ${calls.length}, Multiplier: ${gasMultiplier.toString()}x`);
+      
+      // Get the chain's gas limit to ensure we don't exceed it
+      const block = await publicClient.getBlock();
+      const blockGasLimit = block.gasLimit;
+      
+      // Make sure our gas limit doesn't exceed the block gas limit
+      const finalGasLimit = gasLimit > blockGasLimit ? blockGasLimit : gasLimit;
+      
+      if (gasLimit > blockGasLimit) {
+        reportProgress('gas_estimation', `Calculated gas limit (${gasLimit.toString()}) exceeds block gas limit (${blockGasLimit.toString()}). Using block gas limit.`);
+      }
+      
+      reportProgress('gas_estimation', `Final gas limit: ${finalGasLimit.toString()}`);
+      
+      // Get the latest gas price to ensure transaction doesn't get stuck
+      const gasPrice = await publicClient.getGasPrice();
+      const gasPriceGwei = Number(gasPrice) / 1e9;
+      reportProgress('gas_estimation', `Current gas price: ${gasPriceGwei.toFixed(2)} Gwei`);
+      
+      // Calculate fee parameters for EIP-1559
+      const maxPriorityFeePerGas = gasPrice / BigInt(5); // 20% of base fee as priority fee
+      const maxFeePerGas = gasPrice * BigInt(120) / BigInt(100); // Base fee + 20% buffer
+      
+      // Calculate the maximum transaction fee
+      const maxFee = Number(finalGasLimit * maxFeePerGas) / 1e18;
+      reportProgress('gas_estimation', `Maximum estimated transaction fee: ${maxFee.toFixed(6)} ETH`);
+      
+      // Check if the user has enough balance for the transaction
+      const userBalance = await publicClient.getBalance({ address: walletState.address });
+      const userBalanceEth = Number(userBalance) / 1e18;
+      
+      if (userBalance < (totalValue + (finalGasLimit * maxFeePerGas))) {
+        const requiredBalance = Number(totalValue + (finalGasLimit * maxFeePerGas)) / 1e18;
+        reportProgress('error', `Insufficient balance. You need at least ${requiredBalance.toFixed(6)} ETH but have ${userBalanceEth.toFixed(6)} ETH.`);
+        throw new Error(`Insufficient balance. You need at least ${requiredBalance.toFixed(6)} ETH but have ${userBalanceEth.toFixed(6)} ETH.`);
+      }
+      
+      reportProgress('transaction', `Submitting transaction with gas limit: ${finalGasLimit.toString()}`);
+      
+      // For Chrome, use the direct sendTransaction approach first as it seems to work better
+      if (isChrome) {
+        reportProgress('chrome_handling', `Using Chrome-specific transaction approach...`);
+        
+        try {
+          // Use direct transaction method for Chrome
+          const hash = await walletClient.sendTransaction({
+            to: walletState.address,
+            value: totalValue,
+            data: callData,
+            gas: finalGasLimit,
+            nonce,
+            authorizationList: [authorization],
+            maxFeePerGas,
+            maxPriorityFeePerGas
           });
           
-          // Use a more direct approach that might work better in Chrome
+          reportProgress('transaction_complete', `✅ Transaction successfully submitted!`);
+          reportProgress('transaction_complete', `Transaction hash: ${hash}`);
+          reportProgress('transaction_complete', `View on ${config.chain.name} explorer: ${config.chain.blockExplorers?.default.url}/tx/${hash}`);
+          return hash;
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          reportProgress('chrome_error', `Chrome-specific approach failed: ${errorMessage}`);
+          reportProgress('fallback', `Trying standard approach as fallback...`);
+          
+          // Fall back to the standard approach with even higher gas
+          const fallbackGasLimit = finalGasLimit * BigInt(120) / BigInt(100);
+          
+          const hash = await walletClient.writeContract({
+            abi: BATCH_CALL_DELEGATION_ABI,
+            address: walletState.address,
+            functionName: 'execute',
+            args: [calls],
+            value: totalValue,
+            authorizationList: [authorization],
+            nonce: nonce,
+            gas: fallbackGasLimit,
+            maxFeePerGas: maxFeePerGas * BigInt(120) / BigInt(100),
+            maxPriorityFeePerGas: maxPriorityFeePerGas * BigInt(120) / BigInt(100)
+          });
+          
+          reportProgress('transaction_complete', `✅ Transaction successfully submitted!`);
+          reportProgress('transaction_complete', `Transaction hash: ${hash}`);
+          reportProgress('transaction_complete', `View on ${config.chain.name} explorer: ${config.chain.blockExplorers?.default.url}/tx/${hash}`);
+          return hash;
+        }
+      } else {
+        // Standard approach for Brave and other browsers
+        const hash = await walletClient.writeContract({
+          abi: BATCH_CALL_DELEGATION_ABI,
+          address: walletState.address,
+          functionName: 'execute',
+          args: [calls],
+          value: totalValue,
+          authorizationList: [authorization],
+          nonce: nonce,
+          gas: finalGasLimit,
+          maxFeePerGas,
+          maxPriorityFeePerGas
+        }).catch(async (error) => {
+          // If the transaction fails, try a fallback approach with direct transaction
+          reportProgress('fallback', `Primary transaction failed. Using fallback approach...`);
+          reportProgress('fallback', `Error: ${error?.message || 'Unknown error'}`);
+          
+          // Try with an even higher gas limit for the fallback
+          const fallbackGasLimit = finalGasLimit * BigInt(120) / BigInt(100); // 20% more gas
+          reportProgress('gas_estimation', `Fallback gas limit: ${fallbackGasLimit.toString()}`);
+          
+          // Use a more direct approach
           return await walletClient.sendTransaction({
             to: walletState.address,
             value: totalValue,
-            data,
-            gas: gasLimit,
+            data: callData,
+            gas: fallbackGasLimit,
             nonce,
             authorizationList: [authorization],
+            maxFeePerGas: maxFeePerGas * BigInt(120) / BigInt(100),
+            maxPriorityFeePerGas: maxPriorityFeePerGas * BigInt(120) / BigInt(100)
           });
-        }
-        
-        throw error;
-      });
+        });
 
-      reportProgress('transaction_complete', `✅ Transaction successfully submitted!`);
-      reportProgress('transaction_complete', `Transaction hash: ${hash}`);
-      reportProgress('transaction_complete', `View on ${config.chain.name} explorer: ${config.chain.blockExplorers?.default.url}/tx/${hash}`);
-      return hash;
+        reportProgress('transaction_complete', `✅ Transaction successfully submitted!`);
+        reportProgress('transaction_complete', `Transaction hash: ${hash}`);
+        reportProgress('transaction_complete', `View on ${config.chain.name} explorer: ${config.chain.blockExplorers?.default.url}/tx/${hash}`);
+        return hash;
+      }
     } catch (error: any) {
       // Check if it's a nonce error and retry if needed
       if (error?.message?.includes('nonce too low') || error?.message?.includes('nonce')) {
