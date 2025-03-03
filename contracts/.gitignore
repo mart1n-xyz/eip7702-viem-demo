@@ -12,3 +12,6 @@ docs/
 
 # Dotenv file
 .env
+
+# Foundry config with API keys
+foundry.toml

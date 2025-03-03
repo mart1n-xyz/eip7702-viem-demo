@@ -3,4 +3,7 @@ src = "src"
 out = "out"
 libs = ["lib"]
 
+[etherscan]
+holesky = { key = "JAE544SPUKRNM5Q6Y67WX41TX3EMGPRC3P" }
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

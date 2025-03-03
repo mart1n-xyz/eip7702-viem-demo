@@ -1,6 +1,7 @@
 <script lang="ts">
   import { walletStore, connectWallet, disconnectWallet, formatAddress, formatEthBalance } from '$lib/wallet';
   import { page } from '$app/stores';
+  import NetworkSwitch from '../../components/NetworkSwitch.svelte';
   
   let connecting = false;
   let mobileMenuOpen = false;
@@ -68,8 +69,8 @@
         
         {#if $walletStore.isConnected && $walletStore.address}
           <div class="hidden md:flex items-center space-x-3">
+            <NetworkSwitch />
             <div class="border border-gray-200 rounded-full px-3 py-1 text-gray-600 flex items-center">
-              <div class="h-2 w-2 bg-green-400 rounded-full mr-2"></div>
               <span class="font-mono text-sm">{formatAddress($walletStore.address)}</span>
             </div>
             <div class="border border-gray-200 rounded-full px-3 py-1 text-gray-600">
@@ -110,6 +111,7 @@
     {#if mobileMenuOpen}
       <div class="md:hidden mt-3 pt-3 border-t border-gray-100">
         <div class="flex flex-col items-center space-y-3 pb-3">
+          <NetworkSwitch />
           <a 
             href="/" 
             class="py-1 {isActive('/') ? 'text-blue-400 font-medium' : 'text-gray-600 hover:text-blue-400 font-medium'}"
@@ -128,7 +130,6 @@
           <div class="pt-3 border-t border-gray-100 flex flex-col space-y-2">
             <div class="text-sm text-gray-500">Connected as:</div>
             <div class="border border-gray-200 rounded-full px-3 py-1 text-gray-600 flex items-center self-start">
-              <div class="h-2 w-2 bg-green-400 rounded-full mr-2"></div>
               <span class="font-mono text-sm">{formatAddress($walletStore.address)}</span>
             </div>
             <div class="border border-gray-200 rounded-full px-3 py-1 text-gray-600 self-start">

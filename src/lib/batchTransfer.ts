@@ -1,12 +1,9 @@
 import { createPublicClient, createWalletClient, http, type Address, encodeFunctionData } from 'viem';
-import { sepolia } from 'viem/chains';
 import { walletStore } from './wallet';
 import { get } from 'svelte/store';
 // Import the eip7702Actions from viem/experimental
 import { eip7702Actions } from 'viem/experimental';
-
-// BatchCallDelegation contract address - deployed on Sepolia
-export const BATCH_CALL_DELEGATION_ADDRESS = '0x6987E30398b2896B5118ad1076fb9f58825a6f1a' as Address;
+import { currentChainConfig } from './chainConfig';
 
 // BatchCallDelegation contract ABI
 export const BATCH_CALL_DELEGATION_ABI = [
@@ -29,16 +26,18 @@ export const BATCH_CALL_DELEGATION_ABI = [
   }
 ] as const;
 
-// Get Alchemy API key from environment variable
-const ALCHEMY_API_KEY = import.meta.env.VITE_ALCHEMY_API_KEY || 'demo';
-
-// Alchemy RPC endpoint for Sepolia
-const ALCHEMY_RPC_URL = `https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
-
 // Create a public client for reading from the blockchain
 export const publicClient = createPublicClient({
-  chain: sepolia,
-  transport: http(ALCHEMY_RPC_URL)
+  chain: get(currentChainConfig).chain,
+  transport: http(get(currentChainConfig).rpcUrl)
+});
+
+// Subscribe to chain changes and update the public client
+currentChainConfig.subscribe((config) => {
+  Object.assign(publicClient, {
+    chain: config.chain,
+    transport: http(config.rpcUrl)
+  });
 });
 
 // Define a type for progress callbacks
@@ -50,6 +49,7 @@ export async function batchTransfer(
   onProgress?: ProgressCallback
 ) {
   const { address } = get(walletStore);
+  const config = get(currentChainConfig);
   
   if (!address) {
     throw new Error('Wallet not connected');
@@ -75,15 +75,15 @@ export async function batchTransfer(
     // Create wallet client with EIP-7702 actions
     const walletClient = createWalletClient({
       account: address,
-      chain: sepolia,
-      transport: http(ALCHEMY_RPC_URL)
+      chain: config.chain,
+      transport: http(config.rpcUrl)
     }).extend(eip7702Actions());
     
     // Step 1: Sign the authorization for EIP-7702
     reportProgress('authorization', 'Signing authorization for EIP-7702...');
     
     const authorization = await walletClient.signAuthorization({
-      contractAddress: BATCH_CALL_DELEGATION_ADDRESS,
+      contractAddress: config.batchCallDelegationAddress,
     });
     
     reportProgress('authorization_complete', 'Authorization signed successfully');
@@ -126,7 +126,7 @@ export async function batchTransfer(
         value: `0x${totalValue.toString(16)}`,
         // Try with the standard EIP-7702 format
         eip7702: {
-          address: BATCH_CALL_DELEGATION_ADDRESS,
+          address: config.batchCallDelegationAddress,
           signature: '0x', // Empty signature for direct delegation
           calldata: '0x'
         }
@@ -161,7 +161,7 @@ export async function batchTransfer(
             data,
             value: `0x${totalValue.toString(16)}`,
             delegation: {
-              delegateTo: BATCH_CALL_DELEGATION_ADDRESS,
+              delegateTo: config.batchCallDelegationAddress,
               delegateData: '0x'
             }
           };

@@ -1,27 +1,30 @@
 <script lang="ts">
 	import { walletStore } from '$lib/wallet';
-	import { sepolia } from 'viem/chains';
-	import { BATCH_CALL_DELEGATION_ADDRESS, batchTransfer } from '$lib/batchTransfer';
+	import { sepolia, holesky } from 'viem/chains';
+	import { batchTransfer } from '$lib/batchTransfer';
+	import { chainConfigs, currentChainConfig } from '$lib/chainConfig';
 	import { parseEther, type Address } from 'viem';
 	import { onMount } from 'svelte';
 
-	// Check if connected to the correct chain (Sepolia)
+	// Get current chain from config
+	$: currentChain = $currentChainConfig.chain;
 	$: isCorrectChain =
-		$walletStore.isConnected && window?.ethereum?.chainId === `0x${sepolia.id.toString(16)}`;
+		$walletStore.isConnected && window?.ethereum?.chainId === `0x${currentChain.id.toString(16)}`;
 
-	// Function to switch network and reload page
-	function switchToSepolia() {
+	// Check if connected to the correct chain and handle network changes
+	$: {
+		if ($walletStore.isConnected && currentChain && window?.ethereum?.chainId !== `0x${currentChain.id.toString(16)}`) {
+			switchNetwork(currentChain.name === 'Sepolia' ? sepolia : holesky);
+		}
+	}
+
+	// Function to switch network
+	function switchNetwork(targetChain: typeof sepolia | typeof holesky) {
 		if (window.ethereum) {
 			window.ethereum
 				.request({
 					method: 'wallet_switchEthereumChain',
-					params: [{ chainId: `0x${sepolia.id.toString(16)}` }]
-				})
-				.then(() => {
-					// Reload page after 1 second
-					setTimeout(() => {
-						window.location.reload();
-					}, 1000);
+					params: [{ chainId: `0x${targetChain.id.toString(16)}` }]
 				})
 				.catch(console.error);
 		}
@@ -167,7 +170,7 @@
 	let isContractDeployed = false;
 
 	onMount(async () => {
-		if (BATCH_CALL_DELEGATION_ADDRESS !== '0x0000000000000000000000000000000000000000') {
+		if ($currentChainConfig.batchCallDelegationAddress !== ('0x0000000000000000000000000000000000000000' as `0x${string}`)) {
 			isContractDeployed = true;
 			addLog('Page loaded. Contract is deployed and ready to use.');
 		} else {
@@ -245,13 +248,13 @@ contract BatchCallDelegation {
 							/>
 						</svg>
 					</div>
-					<h3 class="mb-2 text-lg font-medium text-gray-700">Wrong Network</h3>
-					<p class="mb-4 text-gray-600">Please switch to the Sepolia testnet to use this example</p>
+					<h3 class="mb-2 text-lg font-medium text-gray-700">Switching Network...</h3>
+					<p class="mb-4 text-gray-600">Please approve the network switch in your wallet</p>
 					<button
 						class="rounded-md bg-blue-400 px-4 py-2 font-medium text-white transition-colors duration-200 hover:bg-blue-500"
-						on:click={switchToSepolia}
+						on:click={() => switchNetwork(currentChain === sepolia ? sepolia : holesky)}
 					>
-						Switch to Sepolia
+						Switch to {currentChain.name}
 					</button>
 				</div>
 			{:else if !isContractDeployed}
@@ -260,7 +263,7 @@ contract BatchCallDelegation {
 					<p class="mb-2">The BatchCallDelegation contract has not been deployed yet.</p>
 					<p>
 						Please deploy the contract using Foundry and update the contract address in <code
-							>src/lib/batchTransfer.ts</code
+							>src/lib/chainConfig.ts</code
 						>.
 					</p>
 				</div>
@@ -280,13 +283,13 @@ contract BatchCallDelegation {
 						</a>.
 					</p>
 					<p class="mb-2">
-						The contract is deployed on Sepolia at:
+						The contract is deployed on {currentChain.name} at:
 						<a 
-							href="https://sepolia.etherscan.io/address/0x6987E30398b2896B5118ad1076fb9f58825a6f1a"
+							href="{currentChain.blockExplorers?.default.url}/address/{$currentChainConfig.batchCallDelegationAddress}"
 							target="_blank"
 							rel="noopener noreferrer"
 							class="bg-gray-100 px-1 py-0.5 rounded text-sm font-mono hover:bg-gray-200 transition-colors"
-						>0x6987E30398b2896B5118ad1076fb9f58825a6f1a</a>
+						>{$currentChainConfig.batchCallDelegationAddress}</a>
 					</p>
 
 					<div class="mt-4">
