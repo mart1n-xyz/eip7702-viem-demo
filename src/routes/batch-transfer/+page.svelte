@@ -26,7 +26,31 @@
 					method: 'wallet_switchEthereumChain',
 					params: [{ chainId: `0x${targetChain.id.toString(16)}` }]
 				})
-				.catch(console.error);
+				.catch((switchError: { code: number }) => {
+					// This error code indicates that the chain has not been added to MetaMask.
+					if (switchError.code === 4902) {
+						window.ethereum.request({
+							method: 'wallet_addEthereumChain',
+							params: [
+								{
+									chainId: `0x${targetChain.id.toString(16)}`,
+									chainName: targetChain.name,
+									rpcUrls: [targetChain === holesky ? 
+										`https://eth-holesky.g.alchemy.com/v2/${import.meta.env.VITE_ALCHEMY_API_KEY}` : 
+										`https://eth-sepolia.g.alchemy.com/v2/${import.meta.env.VITE_ALCHEMY_API_KEY}`],
+									nativeCurrency: {
+										name: 'ETH',
+										symbol: 'ETH',
+										decimals: 18
+									},
+									blockExplorerUrls: [targetChain.blockExplorers?.default.url]
+								}
+							]
+						}).catch(console.error);
+					} else {
+						console.error(switchError);
+					}
+				});
 		}
 	}
 
