@@ -1,4 +1,5 @@
 import { createPublicClient, createWalletClient, http, type Address, encodeFunctionData } from 'viem';
+import { privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts';
 import { walletStore } from './wallet';
 import { get } from 'svelte/store';
 // Import the eip7702Actions from viem/experimental
@@ -40,26 +41,54 @@ currentChainConfig.subscribe((config) => {
   });
 });
 
-// Define a type for progress callbacks
-type ProgressCallback = (step: string, message: string) => void;
+// Type for progress callback
+export type ProgressCallback = (step: string, message: string) => void;
+
+// Type for signing confirmation
+export type SigningConfirmation = {
+  title: string;
+  message: string;
+  data: string;
+  onConfirm: () => Promise<void>;
+  onCancel: () => void;
+};
+
+// Helper function to make data JSON-serializable
+const prepareDataForDisplay = (data: any): any => {
+  if (typeof data === 'bigint') {
+    return data.toString();
+  }
+  if (Array.isArray(data)) {
+    return data.map(prepareDataForDisplay);
+  }
+  if (typeof data === 'object' && data !== null) {
+    const result: { [key: string]: any } = {};
+    for (const [key, value] of Object.entries(data)) {
+      result[key] = prepareDataForDisplay(value);
+    }
+    return result;
+  }
+  return data;
+};
 
 // Function to perform a batch transfer
 export async function batchTransfer(
   transfers: Array<{ to: Address; value: bigint; data?: `0x${string}` }>,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  onSigningRequest?: (confirmation: SigningConfirmation) => Promise<void>
 ) {
-  const { address } = get(walletStore);
+  const walletState = get(walletStore);
   const config = get(currentChainConfig);
   
-  if (!address) {
+  if (!walletState.address) {
     throw new Error('Wallet not connected');
   }
   
   // Format the calls for the BatchCallDelegation contract
-  const calls = transfers.map((transfer) => ({
+  const calls = transfers.map(transfer => ({
+    data: '0x' as `0x${string}`, // Empty data for simple ETH transfers
     to: transfer.to,
-    value: transfer.value,
-    data: transfer.data || '0x' as `0x${string}`
+    value: transfer.value
   }));
   
   // Calculate the total value to send
@@ -70,117 +99,185 @@ export async function batchTransfer(
     console.log(`[${step}] ${message}`);
     if (onProgress) onProgress(step, message);
   };
+
+  // Helper function to request signing confirmation
+  const requestSigningConfirmation = async (title: string, message: string, data: string): Promise<void> => {
+    if (!onSigningRequest) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+      onSigningRequest({
+        title,
+        message,
+        data,
+        onConfirm: async () => {
+          resolve();
+        },
+        onCancel: () => {
+          reject(new Error('User rejected signing request'));
+        }
+      });
+    });
+  };
   
   try {
-    // Create wallet client with EIP-7702 actions
-    const walletClient = createWalletClient({
-      account: address,
-      chain: config.chain,
-      transport: http(config.rpcUrl)
-    }).extend(eip7702Actions());
-    
-    // Step 1: Sign the authorization for EIP-7702
-    reportProgress('authorization', 'Signing authorization for EIP-7702...');
-    
+    // Create wallet client based on connection type
+    const walletClient = walletState.isPrivateKeyAccount && walletState.privateKey
+      ? createWalletClient({
+          account: privateKeyToAccount(walletState.privateKey),
+          chain: config.chain,
+          transport: http(config.rpcUrl)
+        }).extend(eip7702Actions())
+      : createWalletClient({
+          account: walletState.address,
+          chain: config.chain,
+          transport: http(config.rpcUrl)
+        }).extend(eip7702Actions());
+
+    reportProgress('preparing', walletState.isPrivateKeyAccount 
+      ? 'Preparing EIP-7702 batch transfer with private key account...'
+      : 'Preparing EIP-7702 batch transfer with connected wallet...');
+
+    reportProgress('preparing', `Preparing to transfer to ${transfers.length} recipients`);
+    reportProgress('preparing', `Total value: ${(Number(totalValue) / 10**18).toFixed(6)} ETH`);
+    reportProgress('preparing', `Network: ${config.chain.name}`);
+
+    // Show authorization data before signing
+    const authorizationData = {
+      contractAddress: config.batchCallDelegationAddress,
+      chain: config.chain.name,
+      account: walletState.address
+    };
+
+    reportProgress('authorization', 'Preparing authorization signature for EIP-7702');
+    reportProgress('authorization', `Contract address: ${config.batchCallDelegationAddress}`);
+    reportProgress('authorization', `This signature will authorize the contract to execute transactions on your behalf`);
+
+    // Request confirmation for authorization signing
+    await requestSigningConfirmation(
+      'Sign EIP-7702 Authorization',
+      'Please review the authorization data that will designate the BatchCallDelegation contract to your account:',
+      JSON.stringify(prepareDataForDisplay(authorizationData), null, 2)
+    );
+
+    // Get authorization for the contract
     const authorization = await walletClient.signAuthorization({
       contractAddress: config.batchCallDelegationAddress,
     });
-    
-    reportProgress('authorization_complete', 'Authorization signed successfully');
-    
-    // Step 2: Execute the batch transfer with the authorization
-    reportProgress('transaction', 'Please approve the transaction in your wallet...');
-    
-    const hash = await walletClient.writeContract({
-      abi: BATCH_CALL_DELEGATION_ABI,
-      address: address, // Important: We're calling the function on the EOA, not the contract
-      functionName: 'execute',
-      args: [calls],
-      value: totalValue,
-      authorizationList: [authorization],
+
+    reportProgress('authorization', walletState.isPrivateKeyAccount 
+      ? `Authorization signed with private key for account ${walletState.address.slice(0, 6)}...${walletState.address.slice(-4)}`
+      : `Authorization signed by wallet for ${config.batchCallDelegationAddress.slice(0, 6)}...${config.batchCallDelegationAddress.slice(-4)} contract on ${config.chain.name}`);
+
+    // Prepare transaction data for display
+    const transactionData = {
+      contract: config.batchCallDelegationAddress,
+      function: 'execute',
+      calls: calls.map(call => ({
+        to: call.to,
+        value: call.value.toString(),
+        data: call.data
+      })),
+      totalValue: totalValue.toString(),
+      chainId: config.chain.id,
+      from: walletState.address,
+      eip7702: {
+        contractAddress: config.batchCallDelegationAddress,
+        authorization: authorization
+      }
+    };
+
+    // Request confirmation for transaction
+    await requestSigningConfirmation(
+      'Sign Transaction',
+      'Please review the transaction data that will be executed:\n\n' +
+      '• This is an EIP-7702 transaction that will execute from YOUR address\n' +
+      '• The authorization signature you provided earlier allows the BatchCallDelegation contract to temporarily execute code in your account\'s context\n' +
+      '• The contract will execute multiple transfers in a single transaction, saving gas\n' +
+      '• Notice that the "to" address is your own address, not the contract address - this is a key feature of EIP-7702\n\n' +
+      'Transaction details:',
+      JSON.stringify(prepareDataForDisplay(transactionData), null, 2)
+    );
+
+    // Get the latest nonce for the account to avoid nonce issues
+    const nonce = await publicClient.getTransactionCount({
+      address: walletState.address
     });
     
-    reportProgress('transaction_complete', `Transaction submitted with hash: ${hash}`);
-    return hash;
-  } catch (error) {
-    console.error('EIP-7702 error:', error);
-    
-    // If we get an error about JSON-RPC accounts, fall back to the direct method
-    if (error instanceof Error && 
-        (error.message.includes('json-rpc') || 
-         error.message.includes('JSON-RPC'))) {
-      reportProgress('fallback', 'Wallet does not support EIP-7702 actions API, trying fallback method...');
+    reportProgress('preparing', `Preparing batch transfer with ${transfers.length} recipient(s)`);
+    reportProgress('preparing', `Total value: ${(Number(totalValue) / 10**18).toFixed(6)} ETH on ${config.chain.name}`);
+    reportProgress('preparing', `Using account: ${walletState.address}`);
+    reportProgress('preparing', `Current nonce: ${nonce}`);
+
+    // Send the transaction with proper nonce handling
+    try {
+      reportProgress('transaction', `Submitting transaction to the network...`);
       
-      // Encode the function data using viem's encodeFunctionData
-      const data = encodeFunctionData({
+      const hash = await walletClient.writeContract({
         abi: BATCH_CALL_DELEGATION_ABI,
+        address: walletState.address,
         functionName: 'execute',
-        args: [calls]
+        args: [calls],
+        value: totalValue,
+        authorizationList: [authorization],
+        nonce: nonce // Explicitly setting the nonce
       });
-      
-      // Create the transaction request
-      const transactionRequest = {
-        from: address,
-        to: address,
-        data,
-        value: `0x${totalValue.toString(16)}`,
-        // Try with the standard EIP-7702 format
-        eip7702: {
-          address: config.batchCallDelegationAddress,
-          signature: '0x', // Empty signature for direct delegation
-          calldata: '0x'
-        }
-      };
-      
-      if (!window.ethereum) {
-        throw new Error('No Ethereum provider found');
-      }
-      
-      try {
-        reportProgress('transaction', 'Please approve the transaction with EIP-7702 metadata in your wallet...');
+
+      reportProgress('transaction_complete', `✅ Transaction successfully submitted!`);
+      reportProgress('transaction_complete', `Transaction hash: ${hash}`);
+      reportProgress('transaction_complete', `View on ${config.chain.name} explorer: ${config.chain.blockExplorers?.default.url}/tx/${hash}`);
+      return hash;
+    } catch (error: any) {
+      // Check if it's a nonce error and retry if needed
+      if (error?.message?.includes('nonce too low') || error?.message?.includes('nonce')) {
+        reportProgress('transaction_retry', `Nonce error detected: ${error.message}`);
         
-        const hash = await window.ethereum.request({
-          method: 'eth_sendTransaction',
-          params: [transactionRequest]
+        // Get an updated nonce and retry
+        const updatedNonce = await publicClient.getTransactionCount({
+          address: walletState.address,
+          blockTag: 'pending' // Use pending to get the latest possible nonce
         });
         
-        reportProgress('transaction_complete', `Transaction submitted with hash: ${hash}`);
-        return hash as `0x${string}`;
-      } catch (innerError) {
-        console.error('EIP-7702 direct transaction error:', innerError);
+        reportProgress('transaction_retry', `Updating nonce from ${nonce} to ${updatedNonce}`);
+        reportProgress('transaction_retry', `Retrying transaction with updated nonce...`);
         
-        // If the wallet doesn't support the eip7702 field, try with the delegation field
-        if (innerError instanceof Error && 
-            (innerError.message.includes('eip7702') || 
-             innerError.message.includes('unknown field'))) {
-          reportProgress('fallback', 'Trying alternative delegation format...');
-          
-          const alternativeRequest = {
-            from: address,
-            to: address,
-            data,
-            value: `0x${totalValue.toString(16)}`,
-            delegation: {
-              delegateTo: config.batchCallDelegationAddress,
-              delegateData: '0x'
-            }
-          };
-          
-          reportProgress('transaction', 'Please approve the transaction with delegation metadata in your wallet...');
-          
-          const hash = await window.ethereum.request({
-            method: 'eth_sendTransaction',
-            params: [alternativeRequest]
-          });
-          
-          reportProgress('transaction_complete', `Transaction submitted with hash: ${hash}`);
-          return hash as `0x${string}`;
-        }
+        const hash = await walletClient.writeContract({
+          abi: BATCH_CALL_DELEGATION_ABI,
+          address: walletState.address,
+          functionName: 'execute',
+          args: [calls],
+          value: totalValue,
+          authorizationList: [authorization],
+          nonce: updatedNonce
+        });
         
-        throw innerError;
+        reportProgress('transaction_complete', `✅ Transaction successfully submitted after nonce retry!`);
+        reportProgress('transaction_complete', `Transaction hash: ${hash}`);
+        reportProgress('transaction_complete', `View on ${config.chain.name} explorer: ${config.chain.blockExplorers?.default.url}/tx/${hash}`);
+        return hash;
       }
+      
+      // Handle other types of errors with more detailed messages
+      if (error?.message) {
+        if (error.message.includes('user rejected')) {
+          reportProgress('error', `Transaction was rejected by the user`);
+        } else if (error.message.includes('insufficient funds')) {
+          reportProgress('error', `Insufficient funds for transaction. Make sure you have enough ETH to cover the transfer amount plus gas fees.`);
+        } else if (error.message.includes('gas')) {
+          reportProgress('error', `Gas estimation failed: ${error.message}`);
+        } else {
+          reportProgress('error', `Transaction failed: ${error.message}`);
+        }
+      } else {
+        reportProgress('error', `Unknown error occurred during transaction`);
+      }
+      
+      // If it's not a nonce error, rethrow
+      throw error;
     }
-    
+  } catch (error) {
+    console.error('EIP-7702 error:', error);
     throw error;
   }
 } 

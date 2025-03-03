@@ -1,4 +1,5 @@
 import { createWalletClient, custom, type WalletClient } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
 import { createPublicClient, http, fallback } from 'viem';
 import { writable, get } from 'svelte/store';
@@ -17,12 +18,16 @@ export const walletStore = writable<{
   isConnected: boolean;
   isConnecting: boolean;
   error: string | null;
+  privateKey: `0x${string}` | null;
+  isPrivateKeyAccount: boolean;
 }>({
   address: null,
   balance: null,
   isConnected: false,
   isConnecting: false,
-  error: null
+  error: null,
+  privateKey: null,
+  isPrivateKeyAccount: false
 });
 
 // Create a public client for Sepolia with Alchemy
@@ -32,10 +37,19 @@ export const publicClient = createPublicClient({
 });
 
 // Function to save connection state to localStorage
-function saveConnectionState(address: `0x${string}`) {
+function saveConnectionState(address: `0x${string}`, privateKey?: `0x${string}`) {
   if (browser) {
     localStorage.setItem('walletConnected', 'true');
     localStorage.setItem('walletAddress', address);
+    
+    // Save private key connection state if provided
+    if (privateKey) {
+      localStorage.setItem('usePrivateKey', 'true');
+      localStorage.setItem('privateKey', privateKey);
+    } else {
+      localStorage.removeItem('usePrivateKey');
+      localStorage.removeItem('privateKey');
+    }
   }
 }
 
@@ -44,6 +58,55 @@ function clearConnectionState() {
   if (browser) {
     localStorage.removeItem('walletConnected');
     localStorage.removeItem('walletAddress');
+    localStorage.removeItem('usePrivateKey');
+    localStorage.removeItem('privateKey');
+  }
+}
+
+// Function to connect with private key
+export async function connectWithPrivateKey(privateKey: string) {
+  try {
+    walletStore.update(state => ({ ...state, isConnecting: true, error: null }));
+    
+    // Validate and format private key
+    if (!privateKey.startsWith('0x')) {
+      privateKey = `0x${privateKey}`;
+    }
+    
+    if (privateKey.length !== 66) {
+      throw new Error('Invalid private key format');
+    }
+    
+    // Create account from private key
+    const account = privateKeyToAccount(privateKey as `0x${string}`);
+    const address = account.address;
+    
+    // Get balance
+    const balance = await publicClient.getBalance({ address });
+    
+    // Save connection state with private key
+    saveConnectionState(address, privateKey as `0x${string}`);
+    
+    // Update store
+    walletStore.update(state => ({
+      ...state,
+      address,
+      balance,
+      isConnected: true,
+      isConnecting: false,
+      privateKey: privateKey as `0x${string}`,
+      isPrivateKeyAccount: true
+    }));
+    
+    return { address, balance };
+  } catch (error) {
+    console.error('Error connecting with private key:', error);
+    walletStore.update(state => ({
+      ...state,
+      isConnecting: false,
+      error: error instanceof Error ? error.message : 'Unknown error connecting with private key'
+    }));
+    throw error;
   }
 }
 
@@ -82,7 +145,9 @@ export async function connectWallet() {
       address,
       balance,
       isConnected: true,
-      isConnecting: false
+      isConnecting: false,
+      privateKey: null,
+      isPrivateKeyAccount: false
     }));
     
     return { address, balance };
@@ -107,7 +172,9 @@ export function disconnectWallet() {
     balance: null,
     isConnected: false,
     isConnecting: false,
-    error: null
+    error: null,
+    privateKey: null,
+    isPrivateKeyAccount: false
   });
 }
 
@@ -129,26 +196,53 @@ export async function initWalletConnection() {
   
   const isConnected = localStorage.getItem('walletConnected') === 'true';
   const savedAddress = localStorage.getItem('walletAddress');
+  const usePrivateKey = localStorage.getItem('usePrivateKey') === 'true';
   
-  if (isConnected && savedAddress && window.ethereum) {
+  if (isConnected && savedAddress) {
     try {
-      // Check if the wallet is still connected
-      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+      // Check if we have a private key connection saved - prioritize this
+      if (usePrivateKey) {
+        const savedPrivateKey = localStorage.getItem('privateKey');
+        if (savedPrivateKey) {
+          // Reconnect using the saved private key
+          try {
+            await connectWithPrivateKey(savedPrivateKey);
+            console.log('Reconnected with saved private key');
+            return; // Early return once connected with private key
+          } catch (error) {
+            console.error('Failed to reconnect with saved private key:', error);
+            clearConnectionState(); // Clear invalid private key connection
+          }
+        }
+      }
       
-      if (accounts.length > 0 && accounts[0].toLowerCase() === savedAddress.toLowerCase()) {
-        // Get balance
-        const address = savedAddress as `0x${string}`;
-        const balance = await publicClient.getBalance({ address });
+      // If we don't have a private key or it failed, try browser wallet
+      if (window.ethereum) {
+        // Check if the wallet is still connected
+        const accounts = await window.ethereum.request({ method: 'eth_accounts' });
         
-        // Update store
-        walletStore.update(state => ({
-          ...state,
-          address,
-          balance,
-          isConnected: true
-        }));
+        if (accounts.length > 0 && accounts[0].toLowerCase() === savedAddress.toLowerCase()) {
+          // Get balance
+          const address = savedAddress as `0x${string}`;
+          const balance = await publicClient.getBalance({ address });
+          
+          // Update store
+          walletStore.update(state => ({
+            ...state,
+            address,
+            balance,
+            isConnected: true,
+            isPrivateKeyAccount: false,
+            privateKey: null
+          }));
+          
+          // Make sure we save state without private key
+          saveConnectionState(address);
+        } else {
+          // Clear connection state if accounts don't match
+          clearConnectionState();
+        }
       } else {
-        // Clear connection state if accounts don't match
         clearConnectionState();
       }
     } catch (error) {

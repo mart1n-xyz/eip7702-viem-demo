@@ -1,15 +1,61 @@
 <script lang="ts">
-	import { walletStore } from '$lib/wallet';
+	import { walletStore, connectWallet } from '$lib/wallet';
 	import { sepolia, holesky } from 'viem/chains';
 	import { batchTransfer } from '$lib/batchTransfer';
 	import { chainConfigs, currentChainConfig } from '$lib/chainConfig';
 	import { parseEther, type Address } from 'viem';
 	import { onMount } from 'svelte';
+	import PrivateKeyInput from '$lib/components/PrivateKeyInput.svelte';
+	import SigningModal from '$lib/components/SigningModal.svelte';
 
 	// Get current chain from config
 	$: currentChain = $currentChainConfig.chain;
 	$: isCorrectChain =
 		$walletStore.isConnected && window?.ethereum?.chainId === `0x${currentChain.id.toString(16)}`;
+
+	// State for warning dropdown
+	let isWarningExpanded = true;
+
+	// State for signing modal
+	let showSigningModal = false;
+	let signingTitle = '';
+	let signingMessage = '';
+	let signingData = '';
+	let onSignConfirm: () => Promise<void> = async () => {};
+	let onSignCancel: () => void = () => {};
+
+	// Function to handle signing requests
+	async function handleSigningRequest(confirmation: {
+		title: string;
+		message: string;
+		data: string;
+		onConfirm: () => Promise<void>;
+		onCancel: () => void;
+	}) {
+		signingTitle = confirmation.title;
+		signingMessage = confirmation.message;
+		signingData = confirmation.data;
+		onSignConfirm = confirmation.onConfirm;
+		onSignCancel = confirmation.onCancel;
+		showSigningModal = true;
+
+		return new Promise<void>((resolve, reject) => {
+			onSignConfirm = async () => {
+				try {
+					await confirmation.onConfirm();
+					showSigningModal = false;
+					resolve();
+				} catch (error) {
+					reject(error);
+				}
+			};
+			onSignCancel = () => {
+				showSigningModal = false;
+				confirmation.onCancel();
+				reject(new Error('User rejected signing'));
+			};
+		});
+	}
 
 	// Check if connected to the correct chain and handle network changes
 	$: {
@@ -93,15 +139,49 @@
 	}
 
 	// Add a log entry
-	function addLog(message: string) {
+	function addLog(stepOrMessage: string, message?: string): void {
+		let logMessage: string;
+		
+		if (message) {
+			// Called with step and message (from progress callback)
+			// Format step to be more descriptive
+			const stepFormatted = formatStepName(stepOrMessage);
+			logMessage = `${stepFormatted}: ${message}`;
+		} else {
+			// Called with just a message
+			logMessage = stepOrMessage;
+		}
+		
 		// Skip logging for filtered messages
-		if (filteredLogMessages.some(filter => message.includes(filter))) {
+		if (filteredLogMessages.some(filter => logMessage.includes(filter))) {
 			return;
 		}
 		
 		const timestamp = new Date().toLocaleTimeString();
-		logs = [`[${timestamp}] ${message}`, ...logs];
+		logs = [`[${timestamp}] ${logMessage}`, ...logs];
 		if (logs.length > 50) logs = logs.slice(0, 50);
+	}
+	
+	// Format step names to be more descriptive
+	function formatStepName(step: string): string {
+		switch (step) {
+			case 'preparing':
+				return 'Preparing Transaction';
+			case 'authorization':
+				return 'Authorization Signing';
+			case 'transaction':
+				return 'Submitting Transaction';
+			case 'transaction_retry':
+				return 'Retrying Transaction';
+			case 'transaction_complete':
+				return 'Transaction Complete';
+			case 'error':
+				return '❌ Error';
+			case 'Validation error':
+				return '❌ Validation Error';
+			default:
+				return step.charAt(0).toUpperCase() + step.slice(1);
+		}
 	}
 
 	// Toggle contract code visibility
@@ -111,80 +191,64 @@
 	}
 
 	// Submit the batch transfer
-	async function submitBatchTransfer() {
+	async function handleSubmit(event: Event) {
+		event.preventDefault();
+		if (isSubmitting) return;
+
 		try {
 			isSubmitting = true;
 			error = null;
 			txHash = null;
-			addLog('Preparing batch transfer...');
 
-			// Validate inputs
-			const transfers = recipients.map((recipient, index) => {
-				if (!recipient || !amounts[index]) {
-					throw new Error('All recipient addresses and amounts must be filled');
-				}
+			// Validate recipients and amounts
+			const validRecipients = recipients.filter((r) => r !== '');
+			const validAmounts = amounts.filter((_, i) => recipients[i] !== '');
 
-				if (!recipient.startsWith('0x') || recipient.length !== 42) {
-					throw new Error(`Invalid Ethereum address: ${recipient}`);
-				}
-
-				const amount = parseEther(amounts[index]);
-
-				return {
-					to: recipient as Address,
-					value: amount
-				};
-			});
-
-			addLog(`Preparing EIP-7702 batch transfer to ${transfers.length} recipients...`);
-			
-			// Execute batch transfer with EIP-7702 with progress callback
-			const hash = await batchTransfer(transfers, (step, message) => {
-				switch (step) {
-					case 'authorization':
-						addLog('Step 1: Requesting authorization signature. Please check your wallet...');
-						break;
-					case 'authorization_complete':
-						addLog('Authorization successfully signed!');
-						break;
-					case 'transaction':
-						addLog('Step 2: Please approve the transaction in your wallet...');
-						break;
-					case 'transaction_complete':
-						addLog(`Transaction submitted: ${message}`);
-						break;
-					case 'fallback':
-						addLog(`Fallback: ${message}`);
-						break;
-					default:
-						addLog(message);
-				}
-			});
-			
-			txHash = hash;
-			addLog(`Transaction complete with hash: ${hash}`);
-		} catch (err) {
-			console.error('Batch transfer error:', err);
-			error = err instanceof Error ? err.message : 'An unknown error occurred';
-			
-			// Check for specific error patterns
-			if (error && error.includes('the method eth_sendTransaction does not exist/is not available')) {
-				error = 'Transaction failed: Your RPC provider does not support EIP-7702. We have configured Alchemy as the RPC provider for this demo, but your wallet may be using a different provider. Please check your wallet settings.';
-			} else if (error && error.includes('user rejected')) {
-				error = 'Transaction was rejected in your wallet.';
-				addLog('Transaction was rejected by the user.');
-			} else if (error && error.includes('authorization')) {
-				error = 'EIP-7702 authorization failed. Please make sure your wallet supports EIP-7702.';
-			} else if (error && error.includes('Account type "json-rpc" is not supported')) {
-				error = 'Your wallet does not support the required account type for EIP-7702. We are trying a fallback approach that should work with most wallets.';
-				addLog('Falling back to direct window.ethereum approach for EIP-7702...');
-			} else if (error && (error.includes('delegation') || error.includes('eip7702'))) {
-				error = 'Your wallet does not support EIP-7702 delegation. Please try a different wallet that supports this feature.';
-			} else if (error && error.includes('signature')) {
-				error = 'There was an issue with the EIP-7702 signature process. We are trying a fallback approach that should work with compatible wallets.';
+			if (validRecipients.length < 2) {
+				const errorMsg = 'At least 2 valid recipient addresses are required for batch transfers. Please add more recipients.';
+				addLog('Validation error', errorMsg);
+				throw new Error(errorMsg);
 			}
-			
-			addLog(`Error: ${error}`);
+
+			if (validRecipients.length !== validAmounts.length) {
+				const errorMsg = 'Each recipient must have a valid amount. Please check all fields.';
+				addLog('Validation error', errorMsg);
+				throw new Error(errorMsg);
+			}
+
+			// Format the transfers array
+			const transfers = validRecipients.map((to, i) => ({
+				to: to as Address,
+				value: parseEther(validAmounts[i])
+			}));
+
+			// Execute the batch transfer with signing confirmation
+			txHash = await batchTransfer(transfers, addLog, handleSigningRequest);
+		} catch (err) {
+			if (err instanceof Error) {
+				if (err.message === 'User rejected signing') {
+					error = 'Transaction was cancelled by user.';
+					addLog('Transaction was cancelled by user.');
+				} else if (err.message.includes('rejected')) {
+					error = 'Transaction was rejected in your wallet.';
+					addLog('Transaction was rejected by the user.');
+				} else if (err.message.includes('authorization')) {
+					error = 'EIP-7702 authorization failed. Please make sure your wallet supports EIP-7702.';
+				} else if (err.message.includes('Account type "json-rpc" is not supported')) {
+					error = 'Your wallet does not support the required account type for EIP-7702. We are trying a fallback approach that should work with most wallets.';
+					addLog('Falling back to direct window.ethereum approach for EIP-7702...');
+				} else if (err.message.includes('delegation') || err.message.includes('eip7702')) {
+					error = 'Your wallet does not support EIP-7702 delegation. Please try a different wallet that supports this feature.';
+				} else if (err.message.includes('signature')) {
+					error = 'There was an issue with the EIP-7702 signature process. We are trying a fallback approach that should work with compatible wallets.';
+				} else {
+					error = err.message;
+					addLog('Error', err.message);
+				}
+			} else {
+				error = 'An unknown error occurred';
+				addLog('Error', 'An unknown error occurred');
+			}
 		} finally {
 			isSubmitting = false;
 		}
@@ -228,28 +292,87 @@ contract BatchCallDelegation {
 		<h1 class="mb-4 text-2xl font-medium text-gray-800">Batch Transfer</h1>
 
 		<div class="prose prose-sm max-w-none text-gray-600">
-			{#if !$walletStore.isConnected}
-				<!-- Not connected state -->
-				<div class="rounded-lg bg-gray-50 p-6 text-center">
-					<div
-						class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-gray-100"
-					>
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							class="h-8 w-8 text-gray-400"
-							fill="none"
-							viewBox="0 0 24 24"
-							stroke="currentColor"
-						>
-							<path
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								stroke-width="1.5"
-								d="M13 10V3L4 14h7v7l9-11h-7z"
-							/>
+			{#if $walletStore.isConnected && !$walletStore.isPrivateKeyAccount}
+				<!-- Warning banner for connected wallets -->
+				<div class="mb-6 bg-amber-50 px-3 py-2 rounded-md inline-flex items-start w-full">
+					<div class="flex-shrink-0 mt-0.5">
+						<svg class="h-4 w-4 text-amber-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+							<path fill-rule="evenodd" d="M8.485 3.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 3.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
 						</svg>
 					</div>
-					<h3 class="mb-2 text-lg font-medium text-gray-700">Connect Wallet to Explore</h3>
+					<div class="ml-2 flex-grow">
+						<button 
+							class="inline-flex items-center focus:outline-none"
+							on:click={() => isWarningExpanded = !isWarningExpanded}
+						>
+							<span class="text-sm font-medium text-amber-800">Limited Browser Wallet Support</span>
+							<svg 
+								class="h-4 w-4 ml-1 text-amber-500 transition-transform duration-200 {isWarningExpanded ? 'rotate-180' : ''}" 
+								xmlns="http://www.w3.org/2000/svg" 
+								viewBox="0 0 20 20" 
+								fill="currentColor"
+							>
+								<path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+							</svg>
+						</button>
+						
+						{#if isWarningExpanded}
+							<div class="mt-1 text-sm text-amber-700 transition-all duration-300">
+								<p>
+									EIP-7702 support in wallets is still emerging. Your current wallet might not fully support this experimental feature.
+									You can <button 
+										on:click={() => {
+											// Disconnect current wallet
+											walletStore.update(state => ({...state, address: null, isConnected: false}));
+										}}
+										class="font-medium text-amber-800 underline hover:text-amber-900"
+									>use a private key instead</button> to guarantee compatibility for testing.
+								</p>
+							</div>
+						{/if}
+					</div>
+				</div>
+			{/if}
+			
+			{#if !$walletStore.isConnected}
+				<!-- Not connected state -->
+				<div class="rounded-lg bg-gray-50 p-6">
+					<div class="grid grid-cols-1 gap-6 md:grid-cols-2">
+						<!-- Regular wallet connection -->
+						<div class="rounded-lg bg-white p-6 shadow-sm border border-gray-100">
+							<div
+								class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-gray-100"
+							>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									class="h-8 w-8 text-gray-400"
+									fill="none"
+									viewBox="0 0 24 24"
+									stroke="currentColor"
+								>
+									<path
+										stroke-linecap="round"
+										stroke-linejoin="round"
+										stroke-width="1.5"
+										d="M13 10V3L4 14h7v7l9-11h-7z"
+									/>
+								</svg>
+							</div>
+							<h3 class="mb-2 text-lg font-medium text-gray-700 text-center">Connect Wallet</h3>
+							<p class="text-sm text-gray-600 text-center mb-4">
+								Connect with MetaMask or another web3 wallet
+							</p>
+							<button
+								class="w-full flex justify-center items-center rounded-md border border-transparent bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:outline-none"
+								on:click={() => connectWallet()}
+							>
+								Connect Wallet
+							</button>
+						</div>
+
+						<!-- Private key input -->
+						<PrivateKeyInput />
+					</div>
 				</div>
 			{:else if !isCorrectChain}
 				<!-- Wrong network state -->
@@ -348,8 +471,17 @@ contract BatchCallDelegation {
 					</div>
 
 					<!-- Warning about RPC provider compatibility -->
-					<div class="mt-4 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-600">
-						EIP-7702 requires a compatible RPC provider and wallet. This demo uses Alchemy, but your wallet might override this. You'll need to approve two requests: first to sign the authorization, then to send the transaction.
+					<div class="mt-4 bg-amber-50 px-3 py-2 rounded-md inline-flex items-start w-full">
+						<div class="flex-shrink-0 mt-0.5">
+							<svg class="h-4 w-4 text-amber-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+								<path fill-rule="evenodd" d="M8.485 3.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 3.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
+							</svg>
+						</div>
+						<div class="ml-2 flex-grow">
+							<span class="text-xs text-amber-700">
+								EIP-7702 requires a compatible RPC provider and wallet. This demo uses Alchemy, but your wallet might override this.
+							</span>
+						</div>
 					</div>
 
 					<!-- Collapsible contract code section -->
@@ -403,7 +535,7 @@ contract BatchCallDelegation {
 					</div>
 				</div>
 
-				<form on:submit|preventDefault={submitBatchTransfer} class="space-y-6">
+				<form on:submit|preventDefault={handleSubmit} class="space-y-6">
 					<div class="space-y-4">
 						{#each recipients as _, index}
 							<div class="flex space-x-2">
@@ -501,7 +633,7 @@ contract BatchCallDelegation {
 					{#if txHash}
 						<div class="rounded-md border border-green-100 bg-green-50 p-3 text-sm text-green-700">
 							Transaction submitted! Hash: <a
-								href={`https://sepolia.etherscan.io/tx/${txHash}`}
+								href={`${currentChain.blockExplorers?.default.url}/tx/${txHash}`}
 								target="_blank"
 								rel="noopener noreferrer"
 								class="underline">{txHash}</a
@@ -561,3 +693,13 @@ contract BatchCallDelegation {
 		</div>
 	</div>
 </div>
+
+<!-- Add the SigningModal component -->
+<SigningModal
+	show={showSigningModal}
+	title={signingTitle}
+	message={signingMessage}
+	data={signingData}
+	onConfirm={onSignConfirm}
+	onCancel={onSignCancel}
+/>
