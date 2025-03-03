@@ -214,6 +214,25 @@ export async function batchTransfer(
     try {
       reportProgress('transaction', `Submitting transaction to the network...`);
       
+      // Try with explicit gas estimation to avoid Chrome issues
+      const gasEstimate = await publicClient.estimateContractGas({
+        abi: BATCH_CALL_DELEGATION_ABI,
+        address: walletState.address,
+        functionName: 'execute',
+        args: [calls],
+        value: totalValue,
+        account: walletState.address,
+      }).catch(e => {
+        reportProgress('gas_estimation', `Gas estimation failed: ${e.message}. Using default gas limit.`);
+        // Return a reasonable default if estimation fails
+        return BigInt(500000 + (calls.length * 50000));
+      });
+      
+      reportProgress('gas_estimation', `Estimated gas: ${gasEstimate}`);
+      
+      // Add a buffer to the gas estimate to ensure transaction doesn't fail
+      const gasLimit = gasEstimate * BigInt(120) / BigInt(100); // 20% buffer
+      
       const hash = await walletClient.writeContract({
         abi: BATCH_CALL_DELEGATION_ABI,
         address: walletState.address,
@@ -221,7 +240,38 @@ export async function batchTransfer(
         args: [calls],
         value: totalValue,
         authorizationList: [authorization],
-        nonce: nonce // Explicitly setting the nonce
+        nonce: nonce, // Explicitly setting the nonce
+        gas: gasLimit, // Explicitly set gas limit
+      }).catch(async (error) => {
+        // If the transaction fails with EIP-7702 related errors, try a fallback approach
+        if (
+          error?.message?.includes('EIP-7702') || 
+          error?.message?.includes('delegation') || 
+          error?.message?.includes('authorization') ||
+          error?.message?.includes('reverted') ||
+          error?.message?.includes('execute')
+        ) {
+          reportProgress('fallback', `Using fallback approach for browser compatibility...`);
+          
+          // Encode the function call manually
+          const data = encodeFunctionData({
+            abi: BATCH_CALL_DELEGATION_ABI,
+            functionName: 'execute',
+            args: [calls],
+          });
+          
+          // Use a more direct approach that might work better in Chrome
+          return await walletClient.sendTransaction({
+            to: walletState.address,
+            value: totalValue,
+            data,
+            gas: gasLimit,
+            nonce,
+            authorizationList: [authorization],
+          });
+        }
+        
+        throw error;
       });
 
       reportProgress('transaction_complete', `✅ Transaction successfully submitted!`);

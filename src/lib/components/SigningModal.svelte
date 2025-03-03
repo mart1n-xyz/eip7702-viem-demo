@@ -9,17 +9,21 @@
 </script>
 
 {#if show}
-  <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-    <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full mx-4">
-      <div class="p-6">
+  <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+    <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col">
+      <div class="p-6 flex-shrink-0">
         <h2 class="text-xl font-medium text-gray-800 mb-4">{title}</h2>
         
         <p class="text-gray-600 mb-4 whitespace-pre-line">{message}</p>
-        
+      </div>
+      
+      <div class="px-6 overflow-y-auto flex-grow" style="max-height: calc(90vh - 200px);">
         <div class="bg-gray-50 rounded-lg p-4 font-mono text-sm mb-6 overflow-x-auto">
           <pre class="whitespace-pre-wrap break-all">{data}</pre>
         </div>
-        
+      </div>
+      
+      <div class="p-6 border-t border-gray-200 flex-shrink-0">
         <div class="flex justify-end space-x-4">
           <button
             class="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium rounded-lg"
