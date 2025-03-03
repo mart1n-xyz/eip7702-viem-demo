@@ -4,8 +4,11 @@ import { createPublicClient, http, fallback } from 'viem';
 import { writable, get } from 'svelte/store';
 import { browser } from '$app/environment';
 
-// Get Infura API key from environment variable
-const INFURA_API_KEY = import.meta.env.VITE_INFURA_API_KEY;
+// Get Alchemy API key from environment variable
+const ALCHEMY_API_KEY = import.meta.env.VITE_ALCHEMY_API_KEY || 'demo';
+
+// Alchemy RPC endpoint for Sepolia
+const ALCHEMY_RPC_URL = `https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
 
 // Create a store for wallet state
 export const walletStore = writable<{
@@ -22,14 +25,10 @@ export const walletStore = writable<{
   error: null
 });
 
-// Create a public client for Sepolia with Infura as primary and fallbacks
+// Create a public client for Sepolia with Alchemy
 export const publicClient = createPublicClient({
   chain: sepolia,
-  transport: fallback([
-    http(`https://sepolia.infura.io/v3/${INFURA_API_KEY}`),
-    http('https://eth-sepolia.g.alchemy.com/v2/demo'),
-    http('https://sepolia.gateway.tenderly.co')
-  ])
+  transport: http(ALCHEMY_RPC_URL)
 });
 
 // Function to save connection state to localStorage
