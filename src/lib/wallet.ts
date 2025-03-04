@@ -2,14 +2,12 @@ import { createWalletClient, custom, type WalletClient } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { sepolia } from 'viem/chains';
 import { createPublicClient, http, fallback } from 'viem';
-import { writable, get } from 'svelte/store';
+import { writable, get, derived } from 'svelte/store';
 import { browser } from '$app/environment';
+import { currentChainConfig } from './chainConfig';
 
 // Get Alchemy API key from environment variable
 const ALCHEMY_API_KEY = import.meta.env.VITE_ALCHEMY_API_KEY || 'demo';
-
-// Alchemy RPC endpoint for Sepolia
-const ALCHEMY_RPC_URL = `https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
 
 // Create a store for wallet state
 export const walletStore = writable<{
@@ -30,11 +28,36 @@ export const walletStore = writable<{
   isPrivateKeyAccount: false
 });
 
-// Create a public client for Sepolia with Alchemy
-export const publicClient = createPublicClient({
-  chain: sepolia,
-  transport: http(ALCHEMY_RPC_URL)
-});
+// Create a derived store for the public client that updates when the chain changes
+export const publicClient = derived(
+  currentChainConfig,
+  ($currentChainConfig) => createPublicClient({
+    chain: $currentChainConfig.chain,
+    transport: http($currentChainConfig.rpcUrl)
+  })
+);
+
+// Function to update balance
+export async function updateBalance() {
+  const state = get(walletStore);
+  const client = get(publicClient);
+  
+  if (state.address && state.isConnected) {
+    try {
+      const balance = await client.getBalance({ address: state.address });
+      walletStore.update(state => ({ ...state, balance }));
+    } catch (error) {
+      console.error('Error updating balance:', error);
+    }
+  }
+}
+
+// Subscribe to chain changes to update balance
+if (browser) {
+  currentChainConfig.subscribe(async () => {
+    await updateBalance();
+  });
+}
 
 // Function to save connection state to localStorage
 function saveConnectionState(address: `0x${string}`, privateKey?: `0x${string}`) {
@@ -81,8 +104,9 @@ export async function connectWithPrivateKey(privateKey: string) {
     const account = privateKeyToAccount(privateKey as `0x${string}`);
     const address = account.address;
     
-    // Get balance
-    const balance = await publicClient.getBalance({ address });
+    // Get balance using the current chain's public client
+    const client = get(publicClient);
+    const balance = await client.getBalance({ address });
     
     // Save connection state with private key
     saveConnectionState(address, privateKey as `0x${string}`);
@@ -120,9 +144,12 @@ export async function connectWallet() {
       throw new Error('No Ethereum wallet found. Please install MetaMask or another wallet.');
     }
     
-    // Create a wallet client
+    // Get the current chain configuration
+    const chainConfig = get(currentChainConfig);
+    
+    // Create a wallet client with the current chain
     const walletClient: WalletClient = createWalletClient({
-      chain: sepolia,
+      chain: chainConfig.chain,
       transport: custom(window.ethereum)
     });
     
@@ -133,8 +160,9 @@ export async function connectWallet() {
       throw new Error('No accounts found or user rejected the connection');
     }
     
-    // Get balance
-    const balance = await publicClient.getBalance({ address });
+    // Get balance using the current chain's public client
+    const client = get(publicClient);
+    const balance = await client.getBalance({ address });
     
     // Save connection state to localStorage
     saveConnectionState(address);
@@ -222,9 +250,10 @@ export async function initWalletConnection() {
         const accounts = await window.ethereum.request({ method: 'eth_accounts' });
         
         if (accounts.length > 0 && accounts[0].toLowerCase() === savedAddress.toLowerCase()) {
-          // Get balance
+          // Get balance using the current chain's public client
           const address = savedAddress as `0x${string}`;
-          const balance = await publicClient.getBalance({ address });
+          const client = get(publicClient);
+          const balance = await client.getBalance({ address });
           
           // Update store
           walletStore.update(state => ({
