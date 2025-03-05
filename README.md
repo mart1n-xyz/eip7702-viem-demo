@@ -1,22 +1,51 @@
-# EIP-7702 Batch Transfer Demo
+# EIP-7702 Demo
 
-> ⚠️ **Important Notice**: This is an experimental implementation of EIP-7702. Currently, no wallets fully support EIP-7702, and RPC provider support is limited. 
+ This project demonstrates the implementation of [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) using viem's experimental features.
 
-This project demonstrates the implementation of [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) for batch ETH transfers using viem's experimental features. It implements the examples from [viem docs](https://viem.sh/experimental/eip7702/contract-writes) that allows users to send ETH to multiple recipients in a single transaction, leveraging account abstraction without deploying a smart contract.
+> ⚠️ **Important Notice**: This is an experimental implementation of EIP-7702. Currently, wallet and RPC provider support is limited. The demo uses Alchemy, but your wallet might override this.
+
+## What's EIP-7702?
+
+EIP-7702 is one of the most exciting Ethereum improvements in a while. It lets your regular wallet (EOA) temporarily gain smart contract superpowers!
+
+Imagine your wallet could:
+- **Do multiple things in one go** - Like sending tokens to 10 people at once, saving you gas and time
+- **Let someone else pay gas fees for you** - Perfect for onboarding new users who don't have ETH yet
+
+Without EIP-7702, you'd need to deploy an actual smart contract wallet to do any of this. Now your regular wallet can have these powers temporarily, exactly when needed!
+
+*Technically speaking: EIP-7702 introduces a new transaction type (0x04) with a delegation mechanism that injects contract code into your EOA's execution context.*
+
+## Demo Tools
+
+This demo provides two ways to explore EIP-7702:
+
+### 👉 Batch Transfer Example
+
+See EIP-7702 in action with the example from viem's docs! Send ETH to multiple recipients in a single transaction - something normally impossible with a regular wallet.
+
+- 🔄 Batch transfer ETH to multiple recipients in one transaction
+- 📝 Detailed activity logging and real-time feedback
+- 🛡️ Simple, focused implementation of the viem example
+
+### 🛠️ Transaction Builder
+
+The real power tool! Test EIP-7702 with *any* contract of your choice. Just paste a contract address, select a function, and our tool will handle the EIP-7702 transaction setup for you.
+
+- 📄 ABI detection and function parsing
+- 🎮 Dynamic form generation for any contract function
+- 📱 Visual transaction builder and previewer
+- 🔍 Transaction status tracking and error handling
 
 ## Features
 
-- 🔄 Batch transfer ETH to multiple recipients in one transaction
 - 🔌 Supports both Sepolia and Holesky testnets
-- 🛡️ Implements EIP-7702 with multiple fallback methods
-- 🎨 Clean, modern UI with real-time feedback
-- 📝 Detailed activity logging
-- 🔄 Automatic network switching
-- 💼 MetaMask and other web3 wallet support
+
+- 💼 MetaMask and other web3 wallet support (once they ship it)
 
 ## Live Demo
 
-Try it out at [demo URL]
+Try it out at [https://eip7702demo.netlify.app/]
 
 ## Quick Start
 
@@ -54,20 +83,20 @@ forge script script/Deploy.s.sol --rpc-url your_rpc_url --broadcast
 
 ## How It Works
 
-1. **Authorization**: When initiating a batch transfer, your wallet signs an authorization message allowing the BatchCallDelegation contract to act as an interface.
+1. **Authorization**: When initiating a transaction, your wallet signs an authorization message allowing the contract to act as an interface.
 
-2. **Transaction Creation**: The signed authorization is included with your transaction data containing instructions for multiple transfers.
+2. **Transaction Creation**: The signed authorization is included with your transaction data containing the instructions.
 
-3. **Execution**: During processing, the EVM temporarily injects the BatchCallDelegation contract's code into your EOA's context.
+3. **Execution**: During processing, the EVM temporarily injects the contract's code into your EOA's context.
 
-4. **Batch Processing**: The contract's `execute()` function runs within your EOA's context, processing all transfers atomically.
+4. **Processing**: The contract's functions run within your EOA's context, executing all operations atomically.
 
 ## Technical Details
 
 - Built with SvelteKit and Viem
 - Uses Foundry for contract deployment
 - Implements EIP-7702 with multiple fallback methods for wallet compatibility
-- Supports both modern (EIP-7702 aware) and legacy wallets
+
 
 ## Development
 
