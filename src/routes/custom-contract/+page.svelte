@@ -346,6 +346,7 @@
 	let isSendingTransaction = false;
 	let transactionHash: string | null = null;
 	let transactionStatus: 'pending' | 'confirmed' | 'failed' | null = null;
+	let transactionValue = '0'; // New variable for transaction value input
 
 	// Function to paste authorization from above section
 	function pasteAuthorizationFromAbove() {
@@ -413,6 +414,11 @@
 		functionInputValues[index.toString()] = value;
 	}
 
+	// Function to determine if a function is payable
+	function isPayableFunction(funcDetails: any): boolean {
+		return funcDetails && funcDetails.stateMutability === 'payable';
+	}
+
 	// Function to build the transaction
 	async function buildTransaction(event: Event) {
 		event.preventDefault();
@@ -467,6 +473,17 @@
 			const functionArgs = [];
 			let callsArray = [];
 			let totalValue = BigInt(0);
+			
+			// If the function is payable, use the transaction value
+			if (selectedFunctionDetails && isPayableFunction(selectedFunctionDetails)) {
+				// Convert the input value to BigInt
+				try {
+					totalValue = transactionValue ? BigInt(parseFloat(transactionValue) * 1e18) : BigInt(0);
+					addLog('info', `Setting transaction value to ${transactionValue} ETH (${totalValue} wei)`);
+				} catch (error: any) {
+					throw new Error(`Invalid transaction value: ${error.message}`);
+				}
+			}
 			
 			for (let i = 0; i < selectedFunctionDetails.inputs.length; i++) {
 				const input = selectedFunctionDetails.inputs[i];
@@ -1084,6 +1101,28 @@
 								</div>
 							{/if}
 						</div>
+						
+						<!-- Transaction Value Input for Payable Functions -->
+						{#if contractFunctions.find(f => f.name === selectedFunction && isPayableFunction(f))}
+							<div class="mt-4 p-4 border border-gray-200 rounded-md bg-blue-50">
+								<h3 class="text-md font-medium text-gray-700 mb-3">Transaction Value</h3>
+								<div class="flex items-center">
+									<input
+										type="number"
+										id="transaction-value"
+										placeholder="0.0"
+										class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 text-sm"
+										bind:value={transactionValue}
+										step="0.000000000000000001"
+										min="0"
+									/>
+									<span class="ml-2 text-gray-600 font-medium">ETH</span>
+								</div>
+								<p class="mt-1 text-xs text-gray-500">
+									This function is payable. Enter the amount of ETH to send with the transaction.
+								</p>
+							</div>
+						{/if}
 						
 						<!-- Function Arguments Input Fields -->
 						{#if contractFunctions.find(f => f.name === selectedFunction)}
