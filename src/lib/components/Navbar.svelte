@@ -51,13 +51,13 @@
             href="/batch-transfer" 
             class="transition-colors duration-200 {isActive('/batch-transfer') ? 'text-blue-400 font-medium' : 'text-gray-600 hover:text-blue-400 font-medium'}"
           >
-            Batch Transfer
+            Batch Transfer Example
           </a>
           <a 
             href="/custom-contract" 
             class="transition-colors duration-200 {isActive('/custom-contract') ? 'text-blue-400 font-medium' : 'text-gray-600 hover:text-blue-400 font-medium'}"
           >
-            Custom Contract
+            Transaction Builder
           </a>
         </div>
       </div>
@@ -128,13 +128,13 @@
             href="/batch-transfer" 
             class="py-1 {isActive('/batch-transfer') ? 'text-blue-400 font-medium' : 'text-gray-600 hover:text-blue-400 font-medium'}"
           >
-            Batch Transfer
+            Batch Transfer Example
           </a>
           <a 
             href="/custom-contract" 
             class="py-1 {isActive('/custom-contract') ? 'text-blue-400 font-medium' : 'text-gray-600 hover:text-blue-400 font-medium'}"
           >
-            Custom Contract
+            Transaction Builder
           </a>
         </div>
         

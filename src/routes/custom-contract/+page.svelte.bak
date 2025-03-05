@@ -1,0 +1,974 @@
+<script lang="ts">
+	import { walletStore, connectWallet } from '$lib/wallet';
+	import { sepolia, holesky } from 'viem/chains';
+	import { chainConfigs, currentChainConfig } from '$lib/chainConfig';
+	import { parseEther, type Address, custom } from 'viem';
+	import { onMount } from 'svelte';
+	import PrivateKeyInput from '$lib/components/PrivateKeyInput.svelte';
+	import SigningModal from '$lib/components/SigningModal.svelte';
+	import { createPublicClient, createWalletClient, http, encodeFunctionData } from 'viem';
+	import { privateKeyToAccount } from 'viem/accounts';
+	import { eip7702Actions } from 'viem/experimental';
+
+	// Get current chain from config
+	$: currentChain = $currentChainConfig.chain;
+	$: isCorrectChain =
+		$walletStore.isConnected && window?.ethereum?.chainId === `0x${currentChain.id.toString(16)}`;
+
+	// State for warning dropdown
+	let isWarningExpanded = true;
+
+	// State for signing modal
+	let showSigningModal = false;
+	let signingTitle = '';
+	let signingMessage = '';
+	let signingData = '';
+	let onSignConfirm: () => Promise<void> = async () => {};
+	let onSignCancel: () => void = () => {};
+
+	// Function to handle signing requests
+	async function handleSigningRequest(confirmation: {
+		title: string;
+		message: string;
+		data: string;
+		onConfirm: () => Promise<void>;
+		onCancel: () => void;
+	}) {
+		signingTitle = confirmation.title;
+		signingMessage = confirmation.message;
+		signingData = confirmation.data;
+		onSignConfirm = confirmation.onConfirm;
+		onSignCancel = confirmation.onCancel;
+		showSigningModal = true;
+
+		return new Promise<void>((resolve, reject) => {
+			onSignConfirm = async () => {
+				try {
+					await confirmation.onConfirm();
+					showSigningModal = false;
+					resolve();
+				} catch (error) {
+					reject(error);
+				}
+			};
+			onSignCancel = () => {
+				showSigningModal = false;
+				confirmation.onCancel();
+				reject(new Error('User rejected signing'));
+			};
+		});
+	}
+
+	// Check if connected to the correct chain and handle network changes
+	$: {
+		if ($walletStore.isConnected && currentChain && window?.ethereum?.chainId !== `0x${currentChain.id.toString(16)}`) {
+			switchNetwork(currentChain.name === 'Sepolia' ? sepolia : holesky);
+		}
+	}
+
+	// Function to switch network
+	function switchNetwork(targetChain: typeof sepolia | typeof holesky) {
+		if (window.ethereum) {
+			window.ethereum
+				.request({
+					method: 'wallet_switchEthereumChain',
+					params: [{ chainId: `0x${targetChain.id.toString(16)}` }]
+				})
+				.catch((switchError: { code: number }) => {
+					// This error code indicates that the chain has not been added to MetaMask.
+					if (switchError.code === 4902) {
+						window.ethereum.request({
+							method: 'wallet_addEthereumChain',
+							params: [
+								{
+									chainId: `0x${targetChain.id.toString(16)}`,
+									chainName: targetChain.name,
+									rpcUrls: [targetChain === holesky ? 
+										`https://eth-holesky.g.alchemy.com/v2/${import.meta.env.VITE_ALCHEMY_API_KEY}` : 
+										`https://eth-sepolia.g.alchemy.com/v2/${import.meta.env.VITE_ALCHEMY_API_KEY}`],
+									nativeCurrency: {
+										name: 'ETH',
+										symbol: 'ETH',
+										decimals: 18
+									},
+									blockExplorerUrls: [targetChain.blockExplorers?.default.url]
+								}
+							]
+						}).catch(console.error);
+					} else {
+						console.error(switchError);
+					}
+				});
+		}
+	}
+
+	// State for custom contract form
+	let contractAddress: string = '';
+	let authorizationSigned: string = '';
+	let isSubmitting = false;
+	let error: string | null = null;
+	let logs: string[] = [];
+	let signedAuthorizationData: any = null;
+
+	// Helper function to make data JSON-serializable
+	const prepareDataForDisplay = (data: any): any => {
+		if (typeof data === 'bigint') {
+			return data.toString();
+		}
+		if (Array.isArray(data)) {
+			return data.map(prepareDataForDisplay);
+		}
+		if (typeof data === 'object' && data !== null) {
+			const result: { [key: string]: any } = {};
+			for (const [key, value] of Object.entries(data)) {
+				result[key] = prepareDataForDisplay(value);
+			}
+			return result;
+		}
+		return data;
+	};
+
+	// Add a log entry
+	function addLog(stepOrMessage: string, message?: string): void {
+		let logMessage: string;
+		
+		if (message) {
+			// Called with step and message (from progress callback)
+			// Format step to be more descriptive
+			const stepFormatted = formatStepName(stepOrMessage);
+			logMessage = `${stepFormatted}: ${message}`;
+		} else {
+			// Called with just a message
+			logMessage = stepOrMessage;
+		}
+		
+		const timestamp = new Date().toLocaleTimeString();
+		logs = [`[${timestamp}] ${logMessage}`, ...logs];
+		if (logs.length > 50) logs = logs.slice(0, 50);
+	}
+	
+	// Format step names to be more descriptive
+	function formatStepName(step: string): string {
+		switch (step) {
+			case 'preparing':
+				return 'Preparing Authorization';
+			case 'authorization':
+				return 'Authorization Signing';
+			case 'signing':
+				return 'Signing Authorization';
+			case 'complete':
+				return 'Authorization Complete';
+			case 'data':
+				return '📝 Authorization Data';
+			case 'error':
+				return '❌ Error';
+			case 'Validation error':
+				return '❌ Validation Error';
+			default:
+				return step.charAt(0).toUpperCase() + step.slice(1);
+		}
+	}
+
+	// Copy the authorization to clipboard
+	async function copyAuthorizationToClipboard() {
+		try {
+			if (signedAuthorizationData) {
+				const dataToCopy = JSON.stringify(prepareDataForDisplay(signedAuthorizationData), null, 2);
+				console.log('Copying to clipboard:', dataToCopy);
+				await navigator.clipboard.writeText(dataToCopy);
+				addLog('Authorization copied to clipboard');
+			}
+		} catch (error) {
+			console.error('Error copying to clipboard:', error);
+			addLog('Error copying to clipboard');
+		}
+	}
+
+	// Copy just the raw authorization data to clipboard
+	async function copyRawAuthorizationToClipboard() {
+		try {
+			if (signedAuthorizationData?.authorization) {
+				const rawData = JSON.stringify(prepareDataForDisplay(signedAuthorizationData.authorization), null, 2);
+				console.log('Copying raw data to clipboard:', rawData);
+				await navigator.clipboard.writeText(rawData);
+				addLog('Raw authorization data copied to clipboard');
+			}
+		} catch (error) {
+			console.error('Error copying to clipboard:', error);
+			addLog('Error copying raw authorization to clipboard');
+		}
+	}
+
+	// Validate contract address
+	function isValidAddress(address: string): boolean {
+		// Check if address is a valid Ethereum address
+		return /^0x[a-fA-F0-9]{40}$/.test(address);
+	}
+
+	// Sign the authorization
+	async function signAuthorization(event: Event) {
+		event.preventDefault();
+		if (isSubmitting) return;
+
+		try {
+			isSubmitting = true;
+			error = null;
+			authorizationSigned = '';
+			signedAuthorizationData = null;
+			logs = [];
+			
+			// Validate contract address
+			if (!contractAddress || !isValidAddress(contractAddress)) {
+				throw new Error('Please enter a valid contract address');
+			}
+
+			// Check if wallet is connected
+			if (!$walletStore.isConnected || !$walletStore.address) {
+				throw new Error('Please connect your wallet');
+			}
+
+			addLog('preparing', 'Preparing to sign authorization for contract');
+
+			// Create a wallet client (using MetaMask or private key)
+			let account;
+			let walletClient;
+
+			if ($walletStore.isPrivateKeyAccount && $walletStore.privateKey) {
+				addLog('preparing', 'Using private key account');
+				account = privateKeyToAccount($walletStore.privateKey);
+				walletClient = createWalletClient({
+					account,
+					chain: currentChain,
+					transport: http($currentChainConfig.rpcUrl)
+				}).extend(eip7702Actions());
+			} else {
+				addLog('preparing', 'Using browser wallet');
+				if (!window.ethereum) {
+					throw new Error('No browser wallet detected');
+				}
+				walletClient = createWalletClient({
+					account: $walletStore.address as Address,
+					chain: currentChain,
+					transport: custom(window.ethereum)
+				}).extend(eip7702Actions());
+			}
+
+			addLog('signing', 'Creating authorization for contract ' + contractAddress);
+			
+			try {
+				// Use the signAuthorization method from the extended wallet client
+				const authorizationResult = await walletClient.signAuthorization({
+					contractAddress: contractAddress as Address
+				});
+				
+				// Log the authorization result for debugging (only to console, not to UI logs)
+				console.log('Authorization result:', authorizationResult);
+				addLog('authorization', 'Received authorization data from wallet');
+				
+				// Store the raw authorization data - use prepareDataForDisplay to handle BigInt
+				authorizationSigned = JSON.stringify(prepareDataForDisplay(authorizationResult), null, 2);
+				
+				// Create a simplified version of the authorization data for logs
+				const authSummary = {
+					contractAddress: contractAddress,
+					chain: currentChain.name,
+					account: $walletStore.address,
+					r: authorizationResult.r?.substring(0, 10) + '...',
+					s: authorizationResult.s?.substring(0, 10) + '...',
+					v: authorizationResult.v?.toString()
+				};
+				
+				// Add the authorization data to logs
+				addLog('data', 'Authorization signed with data: ' + JSON.stringify(authSummary));
+				
+				// Create the example transaction structure
+				const exampleTransaction = {
+					contract: contractAddress,
+					function: "execute", // Example function
+					calls: [
+						{
+							to: "0x000000000000000000000000000000000000dEaD",
+							value: "10000000000000000", // 0.01 ETH
+							data: "0x"
+						},
+						{
+							to: "0x6987E30398b2896B5118ad1076fb9f58825a6f1a",
+							value: "10000000000000000", // 0.01 ETH
+							data: "0x"
+						}
+					],
+					totalValue: "20000000000000000", // 0.02 ETH
+					chainId: currentChain.id,
+					from: $walletStore.address,
+					eip7702: {
+						contractAddress: contractAddress,
+						authorization: authorizationResult
+					}
+				};
+				
+				// Store the example transaction
+				signedAuthorizationData = exampleTransaction;
+				
+				addLog('complete', 'Authorization successfully signed');
+			} catch (error: any) {
+				console.error('Error signing authorization:', error);
+				addLog('error', error.message || 'Error signing authorization');
+				throw error;
+			}
+		} catch (error: any) {
+			console.error('Error:', error);
+			error = error.message || 'An unexpected error occurred';
+			addLog('error', error);
+		} finally {
+			isSubmitting = false;
+		}
+	}
+
+	// State for custom EIP-7702 transaction
+	let pastedAuthorization: string = '';
+	let transactionError: string | null = null;
+	let isProcessingTransaction = false;
+	
+	// Etherscan API related state
+	let contractAbi: any[] = [];
+	let contractFunctions: any[] = [];
+	let selectedFunction: string = '';
+	let isLoadingAbi: boolean = false;
+	let abiError: string | null = null;
+	let parsedAuthorization: any = null;
+	
+	// Function input values state
+	let functionInputValues: { [key: string]: string } = {};
+	
+	// Transaction modal state
+	let showTransactionModal = false;
+	let builtTransaction: any = null;
+
+	// Function to paste authorization from above section
+	function pasteAuthorizationFromAbove() {
+		if (authorizationSigned) {
+			pastedAuthorization = authorizationSigned;
+			addLog('Transaction', 'Pasted authorization from above section');
+			parseAuthorizationAndFetchAbi();
+		}
+	}
+	
+	// Parse the pasted authorization and extract contract address
+	async function parseAuthorizationAndFetchAbi() {
+		try {
+			abiError = null;
+			contractAbi = [];
+			contractFunctions = [];
+			selectedFunction = '';
+			functionInputValues = {};
+			
+			if (!pastedAuthorization) {
+				return;
+			}
+			
+			// Parse the authorization JSON
+			parsedAuthorization = JSON.parse(pastedAuthorization);
+			
+			// Extract contract address - handle different possible formats
+			let extractedContractAddress: string | undefined;
+			
+			if (parsedAuthorization.eip7702?.contractAddress) {
+				// Format from our example transaction
+				extractedContractAddress = parsedAuthorization.eip7702.contractAddress;
+			} else if (parsedAuthorization.contractAddress) {
+				// Direct format with contractAddress at root
+				extractedContractAddress = parsedAuthorization.contractAddress;
+			} else if (parsedAuthorization.contract) {
+				// Alternative format with contract field
+				extractedContractAddress = parsedAuthorization.contract;
+			}
+			
+			if (!extractedContractAddress || !isValidAddress(extractedContractAddress)) {
+				throw new Error('Could not find a valid contract address in the pasted authorization');
+			}
+			
+			addLog('Contract', `Found contract address: ${extractedContractAddress}`);
+			
+			// Fetch the contract ABI from Etherscan
+			await fetchContractAbi(extractedContractAddress);
+			
+		} catch (error: any) {
+			console.error('Error parsing authorization:', error);
+			abiError = error.message || 'Failed to parse authorization data';
+			addLog('error', abiError || 'Unknown error parsing authorization');
+		}
+	}
+
+	// Watch for changes in the selected function to reset input values
+	$: if (selectedFunction) {
+		// Reset input values when function changes
+		functionInputValues = {};
+	}
+
+	// Function to handle input value changes
+	function handleInputChange(index: number, value: string) {
+		functionInputValues[index.toString()] = value;
+	}
+
+	// Function to build the transaction
+	async function buildTransaction(event: Event) {
+		event.preventDefault();
+		if (isProcessingTransaction) return;
+
+		try {
+			isProcessingTransaction = true;
+			transactionError = null;
+			builtTransaction = null;
+			addLog('Transaction', 'Building EIP-7702 transaction');
+			
+			// Validate pasted authorization
+			if (!pastedAuthorization) {
+				throw new Error('Please paste a signed authorization');
+			}
+
+			// Validate selected function
+			if (!selectedFunction) {
+				throw new Error('Please select a function to call');
+			}
+
+			// Get the selected function details
+			const selectedFunctionDetails = contractFunctions.find(f => f.name === selectedFunction);
+			if (!selectedFunctionDetails) {
+				throw new Error('Selected function not found in ABI');
+			}
+
+			// Extract contract address from authorization
+			let contractAddress: string;
+			if (parsedAuthorization.eip7702?.contractAddress) {
+				contractAddress = parsedAuthorization.eip7702.contractAddress;
+			} else if (parsedAuthorization.contractAddress) {
+				contractAddress = parsedAuthorization.contractAddress;
+			} else if (parsedAuthorization.contract) {
+				contractAddress = parsedAuthorization.contract;
+			} else {
+				throw new Error('Contract address not found in authorization');
+			}
+
+			// Extract authorization data
+			let authorization: any;
+			if (parsedAuthorization.eip7702?.authorization) {
+				authorization = parsedAuthorization.eip7702.authorization;
+			} else if (parsedAuthorization.authorization) {
+				authorization = parsedAuthorization.authorization;
+			} else {
+				// If the entire object is the authorization
+				authorization = parsedAuthorization;
+			}
+
+			// Prepare function arguments
+			let functionArgs = [];
+			
+			if (selectedFunction === 'execute') {
+				// Special handling for execute function with batch calls
+				
+				// Validate batch calls
+				for (let i = 0; i < batchCalls.length; i++) {
+					const call = batchCalls[i];
+					if (!call.to || !isValidAddress(call.to)) {
+						throw new Error(`Invalid address for call #${i+1}`);
+					}
+					
+					if (!call.data.startsWith('0x')) {
+						throw new Error(`Data must start with 0x for call #${i+1}`);
+					}
+				}
+				
+				// Format the calls array for the contract
+				const formattedCalls = batchCalls.map(call => ({
+					data: call.data,
+					to: call.to,
+					value: call.value
+				}));
+				
+				functionArgs = [formattedCalls];
+				
+			} else {
+				// Standard handling for other functions
+				for (let i = 0; i < selectedFunctionDetails.inputs.length; i++) {
+					const input = selectedFunctionDetails.inputs[i];
+					const value = functionInputValues[i.toString()] || '';
+					
+					if (!value && input.type !== 'bool') {
+						throw new Error(`Missing value for parameter: ${input.name} (${input.type})`);
+					}
+					
+					// Convert the value based on its type
+					let convertedValue;
+					if (input.type.includes('uint')) {
+						// Handle uint types
+						if (value.includes('e')) {
+							// Scientific notation
+							convertedValue = BigInt(Math.floor(Number(value)));
+						} else {
+							convertedValue = BigInt(value);
+						}
+					} else if (input.type.includes('int')) {
+						// Handle int types
+						convertedValue = BigInt(value);
+					} else if (input.type === 'bool') {
+						// Handle boolean
+						convertedValue = value === 'true';
+					} else if (input.type === 'address') {
+						// Handle address
+						if (!isValidAddress(value)) {
+							throw new Error(`Invalid Ethereum address for parameter: ${input.name}`);
+						}
+						convertedValue = value;
+					} else if (input.type.includes('bytes')) {
+						// Handle bytes
+						if (!value.startsWith('0x')) {
+							throw new Error(`Bytes value must start with 0x for parameter: ${input.name}`);
+						}
+						convertedValue = value;
+					} else if (input.type.includes('[]')) {
+						// Handle arrays
+						try {
+							convertedValue = value.split(',').map(item => item.trim());
+							// Further conversion could be done based on array element type
+						} catch (error) {
+							throw new Error(`Invalid array format for parameter: ${input.name}`);
+						}
+					} else if (input.type.includes('tuple')) {
+						// Handle tuples/structs
+						try {
+							convertedValue = JSON.parse(value);
+						} catch (error) {
+							throw new Error(`Invalid JSON format for parameter: ${input.name}`);
+						}
+					} else {
+						// Default case (strings, etc.)
+						convertedValue = value;
+					}
+					
+					functionArgs.push(convertedValue);
+				}
+			}
+
+			// Encode function data
+			let functionData;
+			try {
+				functionData = encodeFunctionData({
+					abi: [selectedFunctionDetails],
+					functionName: selectedFunction,
+					args: functionArgs
+				});
+			} catch (error: any) {
+				console.error('Error encoding function data:', error);
+				throw new Error(`Failed to encode function data: ${error.message}`);
+			}
+
+			// Build the EIP-7702 transaction
+			const transaction = {
+				to: contractAddress as Address,
+				data: functionData,
+				value: BigInt(0), // Default to 0 ETH
+				chainId: currentChain.id,
+				type: '0x4', // EIP-7702 transaction type
+				from: parsedAuthorization.account || $walletStore.address,
+				eip7702: {
+					contractAddress: contractAddress as Address,
+					authorization: authorization
+				}
+			};
+
+			// Store the built transaction
+			builtTransaction = prepareDataForDisplay(transaction);
+			
+			addLog('success', 'Transaction built successfully');
+			
+			// Show the transaction modal
+			showTransactionModal = true;
+			
+		} catch (error: any) {
+			console.error('Transaction error:', error);
+			transactionError = error.message || 'An unexpected error occurred';
+			addLog('error', error.message || 'Transaction error');
+		} finally {
+			isProcessingTransaction = false;
+		}
+	}
+
+	// Function to close the transaction modal
+	function closeTransactionModal() {
+		showTransactionModal = false;
+	}
+
+	// Function to copy the built transaction to clipboard
+	async function copyTransactionToClipboard() {
+		try {
+			if (builtTransaction) {
+				const dataToCopy = JSON.stringify(builtTransaction, null, 2);
+				await navigator.clipboard.writeText(dataToCopy);
+				addLog('Transaction copied to clipboard');
+			}
+		} catch (error) {
+			console.error('Error copying to clipboard:', error);
+			addLog('Error copying transaction to clipboard');
+		}
+	}
+
+	// Fetch contract ABI from Etherscan
+	async function fetchContractAbi(address: string) {
+		isLoadingAbi = true;
+		abiError = null;
+		
+		try {
+			addLog('Etherscan', `Fetching ABI for contract: ${address}`);
+			
+			// Determine the correct Etherscan API URL based on the current chain
+			const chainId = currentChain.id;
+			let apiUrl: string;
+			
+			if (chainId === 1) {
+				// Ethereum Mainnet
+				apiUrl = 'https://api.etherscan.io/api';
+			} else if (chainId === 11155111) {
+				// Sepolia
+				apiUrl = 'https://api-sepolia.etherscan.io/api';
+			} else if (chainId === 17000) {
+				// Holesky
+				apiUrl = 'https://api-holesky.etherscan.io/api';
+			} else {
+				throw new Error(`Unsupported chain ID: ${chainId}`);
+			}
+			
+			// Your Etherscan API key - replace with your actual API key
+			// In production, this should be stored in an environment variable
+			const apiKey = import.meta.env.VITE_ETHERSCAN_API_KEY || '';
+			
+			// Construct the API request URL according to Etherscan documentation
+			const url = `${apiUrl}?module=contract&action=getabi&address=${address}&apikey=${apiKey}`;
+			
+			addLog('Etherscan', `Making API request to Etherscan`);
+			
+			// Fetch the ABI
+			const response = await fetch(url);
+			
+			// Check if response is OK
+			if (!response.ok) {
+				throw new Error(`HTTP error! Status: ${response.status}`);
+			}
+			
+			// Get response text first to debug
+			const responseText = await response.text();
+			
+			// Try to parse as JSON
+			let data;
+			try {
+				data = JSON.parse(responseText);
+			} catch (parseError: unknown) {
+				const errorMessage = parseError instanceof Error ? parseError.message : 'Unknown parsing error';
+				console.error('Failed to parse response as JSON:', responseText.substring(0, 200) + '...');
+				throw new Error(`Invalid response from Etherscan API: ${errorMessage}`);
+			}
+			
+			if (data.status === '0') {
+				throw new Error(`Etherscan API error: ${data.message || 'Contract not verified'}`);
+			}
+			
+			// Parse the ABI
+			const abiString = data.result;
+			
+			// Validate that we have a valid ABI string
+			if (!abiString || typeof abiString !== 'string') {
+				throw new Error('Invalid ABI returned from Etherscan');
+			}
+			
+			try {
+				contractAbi = JSON.parse(abiString);
+			} catch (abiParseError: unknown) {
+				const errorMessage = abiParseError instanceof Error ? abiParseError.message : 'Unknown ABI parsing error';
+				console.error('Failed to parse ABI string:', abiString.substring(0, 200) + '...');
+				throw new Error(`Invalid ABI format: ${errorMessage}`);
+			}
+			
+			// Extract functions from the ABI
+			contractFunctions = contractAbi.filter(item => 
+				item.type === 'function' && 
+				item.stateMutability !== 'view' && 
+				item.stateMutability !== 'pure'
+			);
+			
+			if (contractFunctions.length === 0) {
+				addLog('warning', 'No writable functions found in contract ABI');
+			} else {
+				addLog('success', `Found ${contractFunctions.length} writable functions in contract ABI`);
+			}
+			
+		} catch (error: any) {
+			console.error('Error fetching contract ABI:', error);
+			abiError = error.message || 'Failed to fetch contract ABI';
+			addLog('error', abiError || 'Unknown error fetching ABI');
+		} finally {
+			isLoadingAbi = false;
+		}
+	}
+	
+	// Watch for changes in the pasted authorization
+	$: if (pastedAuthorization) {
+		parseAuthorizationAndFetchAbi();
+	}
+
+	// Add these variables and functions to the script section at the top
+	let batchCalls = [
+		{
+			to: '',
+			valueEth: '0.01',
+			value: '10000000000000000', // Default to 0.01 ETH in wei
+			data: '0x'
+		}
+	];
+
+	// Function to add a new batch call
+	function addBatchCall() {
+		batchCalls = [
+			...batchCalls,
+			{
+				to: '',
+				valueEth: '0.01',
+				value: '10000000000000000',
+				data: '0x'
+			}
+		];
+	}
+
+	// Function to remove a batch call
+	function removeBatchCall(index: number) {
+		batchCalls = batchCalls.filter((_, i) => i !== index);
+	}
+
+	// Function to update the wei value when ETH value changes
+	function updateWeiValue(index: number) {
+		try {
+			// Convert ETH to wei (1 ETH = 10^18 wei)
+			const ethValue = parseFloat(batchCalls[index].valueEth);
+			if (!isNaN(ethValue)) {
+				const weiValue = BigInt(Math.floor(ethValue * 1e18)).toString();
+				batchCalls[index].value = weiValue;
+			}
+		} catch (error) {
+			console.error('Error converting ETH to wei:', error);
+		}
+	}
+</script>
+
+<div class="container mx-auto px-4 py-8 max-w-5xl">
+	<h1 class="text-3xl font-bold mb-6">Custom Contract Authorization</h1>
+	
+	<!-- Emergency Debug Display -->
+	
+	<!-- Warning Section - REMOVED -->
+	
+	<!-- Form Section -->
+	<div class="mb-8 bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+		<div class="p-6">
+			<h2 class="text-xl font-semibold mb-4">Sign Authorization</h2>
+			
+			<form on:submit={signAuthorization} class="space-y-4">
+				<!-- Contract Address Input -->
+				<div>
+					<label for="contractAddress" class="block text-sm font-medium text-gray-700 mb-1">
+						Contract Address
+					</label>
+					<input
+						type="text"
+						id="contractAddress"
+						bind:value={contractAddress}
+						placeholder="0x..."
+						class="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+					/>
+					<p class="mt-1 text-sm text-gray-500">Enter the contract address you want to authorize</p>
+				</div>
+				
+				<!-- Network Warning -->
+				{#if $walletStore.isConnected && !isCorrectChain}
+					<div class="p-4 bg-red-50 border border-red-200 rounded-md text-red-800 text-sm">
+						⚠️ You are connected to the wrong network. Please switch to {currentChain.name}.
+					</div>
+				{/if}
+				
+				<!-- Submit Button -->
+				<div class="flex justify-end mt-4">
+					<button
+						type="submit"
+						disabled={isSubmitting || !$walletStore.isConnected || !isCorrectChain}
+						class="px-4 py-2 bg-blue-600 text-white font-medium rounded-md hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+					>
+						{isSubmitting ? 'Signing...' : 'Sign Authorization'}
+					</button>
+				</div>
+				
+				<!-- Error Message -->
+				{#if error}
+					<div class="p-4 bg-red-50 border border-red-200 rounded-md text-red-800 text-sm mt-4">
+						{error}
+					</div>
+				{/if}
+			</form>
+		</div>
+	</div>
+	
+	<!-- Raw Authorization Data -->
+	{#if authorizationSigned}
+		<div class="mb-8 bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+			<div class="p-6">
+				<h2 class="text-xl font-semibold mb-4 flex justify-between items-center">
+					<span>Authorization Data</span>
+					<div class="flex space-x-2">
+						<button
+							on:click={() => {
+								navigator.clipboard.writeText(authorizationSigned);
+								addLog('Authorization data copied to clipboard');
+							}}
+							class="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200"
+						>
+							Copy Data
+						</button>
+						<button
+							on:click={pasteAuthorizationFromAbove}
+							class="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded-md hover:bg-blue-200"
+						>
+							Use Below
+						</button>
+					</div>
+				</h2>
+				
+				<div class="bg-gray-50 rounded-md p-4 font-mono text-sm overflow-x-auto">
+					<pre>{authorizationSigned}</pre>
+				</div>
+			</div>
+		</div>
+	{/if}
+	
+	<!-- Custom EIP-7702 Transaction Section -->
+	<div class="mb-8 bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+		<div class="p-6">
+			<h2 class="text-xl font-semibold mb-4">Custom EIP-7702 Transaction</h2>
+			<p class="text-sm text-gray-600 mb-4">
+				Build and send a custom EIP-7702 transaction (type 0x4) with a signed authorization.
+			</p>
+			
+			<form on:submit={buildTransaction} class="space-y-4">
+				<!-- Pasted Authorization Input -->
+				<div>
+					<label for="pastedAuthorization" class="block text-sm font-medium text-gray-700 mb-1">
+						Signed Authorization
+					</label>
+					<textarea
+						id="pastedAuthorization"
+						bind:value={pastedAuthorization}
+						placeholder="Paste signed authorization JSON here..."
+						class="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 font-mono text-sm h-32"
+					></textarea>
+					<p class="mt-1 text-sm text-gray-500">Paste a signed authorization or use the "Use Below" button from above</p>
+				</div>
+				
+				<!-- Contract ABI Status -->
+				{#if isLoadingAbi}
+					<div class="p-4 bg-blue-50 border border-blue-200 rounded-md text-blue-800 text-sm">
+						<div class="flex items-center">
+							<svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+								<circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+								<path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+							</svg>
+							<span>Fetching contract ABI from Etherscan...</span>
+						</div>
+					</div>
+				{:else if abiError}
+					<div class="p-4 bg-red-50 border border-red-200 rounded-md text-red-800 text-sm">
+						<p class="font-medium">Contract ABI Error:</p>
+						<p>{abiError}</p>
+						<p class="mt-2">The contract may not be verified on Etherscan. You cannot proceed without a verified contract.</p>
+					</div>
+				{:else if contractFunctions.length > 0}
+					<div class="p-4 bg-green-50 border border-green-200 rounded-md text-green-800 text-sm">
+						<p class="font-medium">✅ Contract ABI loaded successfully</p>
+						<p>Found {contractFunctions.length} writable functions in the contract.</p>
+					</div>
+					
+					<!-- Function Selector Dropdown -->
+					<div>
+						<label for="functionSelector" class="block text-sm font-medium text-gray-700 mb-1">
+							Select Contract Function
+						</label>
+						<select
+							id="functionSelector"
+							bind:value={selectedFunction}
+							class="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+						>
+							<option value="">-- Select a function --</option>
+							{#each contractFunctions as func}
+								<option value={func.name}>
+									{func.name}({func.inputs.map((input: any) => `${input.type} ${input.name}`).join(', ')})
+								</option>
+							{/each}
+						</select>
+						<p class="mt-1 text-sm text-gray-500">Choose a function to call on the contract</p>
+					</div>
+					
+					<!-- Function Details (if a function is selected) -->
+					{#if selectedFunction}
+						<div class="p-4 bg-gray-50 border border-gray-200 rounded-md">
+							<h3 class="text-md font-medium text-gray-700 mb-2">Function Details</h3>
+							{#if contractFunctions.find(f => f.name === selectedFunction)}
+								{@const selectedFunctionDetails = contractFunctions.find(f => f.name === selectedFunction)}
+								<div class="space-y-2">
+									<p class="text-sm"><span class="font-medium">Name:</span> {selectedFunctionDetails.name}</p>
+									<p class="text-sm"><span class="font-medium">Type:</span> {selectedFunctionDetails.stateMutability}</p>
+									
+									{#if selectedFunctionDetails.inputs.length > 0}
+										<div>
+											<p class="text-sm font-medium">Inputs:</p>
+											<ul class="list-disc list-inside text-sm pl-2">
+												{#each selectedFunctionDetails.inputs as input}
+													<li>{input.type} {input.name}</li>
+												{/each}
+											</ul>
+										</div>
+									{:else}
+										<p class="text-sm">No inputs required</p>
+									{/if}
+								</div>
+							{/if}
+						</div>
+						
+						<!-- Function Arguments Input Fields -->
+						{#if contractFunctions.find(f => f.name === selectedFunction)}
+							{@const selectedFunctionDetails = contractFunctions.find(f => f.name === selectedFunction)}
+							{#if selectedFunctionDetails.inputs.length > 0}
+								<div class="mt-4 p-4 border border-gray-200 rounded-md">
+									<h3 class="text-md font-medium text-gray-700 mb-3">Function Arguments</h3>
+									
+									<!-- Special handling for execute function with batch calls -->
+									{#if selectedFunction === 'execute' && selectedFunctionDetails.inputs.some(input => input.type.includes('tuple[]'))}
+										<div class="space-y-6">
+											<p class="text-sm text-gray-600 mb-4">
+												Add one or more calls to execute in a batch.
+											</p>
+											
+											<!-- Dynamic Call Inputs -->
+											<div class="space-y-6">
+												{#each batchCalls as call, index}
+													<div class="p-4 border border-gray-200 rounded-md bg-gray-50">
+														<div class="flex justify-between items-center mb-3">
+															<h4 class="font-medium">Call #{index + 1}</h4>
+															{#if batchCalls.length > 1}
+																<button 
+																	type="button" 
+																	on:click={() => removeBatchCall(index)}
+																	class="text-red-600 hover:text-red-800 text-sm"
+																>
+																	Remove
+																</button>
+															{/if}
+														</div>
+														
+														<div class="space-y-3">
+															<!-- To Address -->
+															<div>
+																<label for={`

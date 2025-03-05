@@ -289,7 +289,7 @@ contract BatchCallDelegation {
 
 <div class="flex flex-col items-center justify-center px-4 sm:px-6">
 	<div class="w-full max-w-2xl rounded-lg border border-gray-100 bg-white p-6 shadow-sm sm:p-8">
-		<h1 class="mb-4 text-2xl font-medium text-gray-800">Batch Transfer</h1>
+		<h1 class="mb-4 text-2xl font-medium text-gray-800">Batch Transfer Example</h1>
 
 		<div class="prose prose-sm max-w-none text-gray-600">
 			{#if $walletStore.isConnected && !$walletStore.isPrivateKeyAccount}
